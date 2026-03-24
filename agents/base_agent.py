@@ -40,6 +40,9 @@ class AgentContext:
     fault_hypothesis: str = ""
     candidate_files: list = field(default_factory=list)
     candidate_methods: list = field(default_factory=list)
+    repo_skeleton: str = ""
+    reflection_feedback: str = ""
+    reflection_round: int = 0
 
     # Agent trace / memory
     agent_traces: list = field(default_factory=list)

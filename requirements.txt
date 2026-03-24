@@ -14,3 +14,5 @@ neo4j>=5.0
 networkx>=3.0
 pyvis>=0.3
 matplotlib>=3.5
+# Agent Skill / MCP server
+mcp[cli]>=1.0

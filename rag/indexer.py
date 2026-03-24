@@ -43,10 +43,16 @@ class CodebaseIndexer:
         persist_directory: str,
         collection_name: str = "codebase",
         embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_api_base: str = "",
+        embedding_api_key: str = "",
     ):
         self.persist_directory = persist_directory
         self.collection_name = collection_name
-        self.embedder = CodeEmbedder(model_name=embedding_model)
+        self.embedder = CodeEmbedder(
+            model_name=embedding_model,
+            api_base=embedding_api_base,
+            api_key=embedding_api_key,
+        )
 
         # Initialize ChromaDB
         os.makedirs(persist_directory, exist_ok=True)

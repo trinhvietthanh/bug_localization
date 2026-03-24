@@ -29,12 +29,31 @@ def setup_logging(level: str = "INFO"):
     logging.basicConfig(
         level=getattr(logging, level.upper()),
         format="%(message)s",
-        handlers=[RichHandler(
-            console=console,
-            show_time=True,
-            show_path=False,
-        )],
+        handlers=[
+            RichHandler(
+                console=console,
+                show_time=True,
+                show_path=False,
+            )
+        ],
     )
+
+
+def _make_retriever(persist_dir: str = None):
+    """Build a CodeRetriever using current config (embedding API or local model)."""
+    from rag.retriever import CodeRetriever
+
+    if persist_dir is None:
+        persist_dir = str(Path(config.rag.persist_directory))
+    retriever = CodeRetriever(
+        persist_directory=persist_dir,
+        embedding_model=config.embedding.model_name,
+        embedding_api_base=config.embedding.api_base,
+        embedding_api_key=config.embedding.api_key,
+    )
+    if retriever.collection and retriever.collection.count() > 0:
+        return retriever
+    return None
 
 
 def cmd_localize(args):
@@ -50,18 +69,40 @@ def cmd_localize(args):
     retriever = None
     if args.repo_path:
         try:
-            from rag.retriever import CodeRetriever
-            persist_dir = str(Path(config.rag.persist_directory))
-            retriever = CodeRetriever(persist_directory=persist_dir)
-            if retriever.collection and retriever.collection.count() > 0:
-                console.print(f"✅ RAG index loaded ({retriever.collection.count()} chunks)")
+            retriever = _make_retriever()
+            if retriever:
+                console.print(
+                    f"✅ RAG index loaded ({retriever.collection.count()} chunks)"
+                )
             else:
-                retriever = None
-                console.print("⚠️  No RAG index found. Run 'index' first for semantic search.")
+                console.print(
+                    "⚠️  No RAG index found. Run 'index' first for semantic search."
+                )
         except Exception:
             console.print("⚠️  RAG not available. Continuing without semantic search.")
 
     orchestrator = Orchestrator(retriever=retriever)
+
+    def _localize_instance(instance):
+        use_multi = args.multi_pass and args.multi_pass > 1
+        refl_kw = {
+            "reflection_max_rounds": args.reflection_rounds,
+            "reflection_conf_threshold": args.reflection_threshold,
+        }
+        if use_multi:
+            return orchestrator.multi_pass_localize(
+                instance,
+                repo_path=args.repo_path,
+                verbose=True,
+                passes=args.multi_pass,
+                **refl_kw,
+            )
+        return orchestrator.localize(
+            instance,
+            repo_path=args.repo_path,
+            verbose=True,
+            **refl_kw,
+        )
 
     if args.instance_id:
         # Load from dataset
@@ -70,9 +111,7 @@ def cmd_localize(args):
         if instance is None:
             console.print(f"[red]Instance '{args.instance_id}' not found[/red]")
             return
-        result = orchestrator.localize(
-            instance, repo_path=args.repo_path, verbose=True
-        )
+        result = _localize_instance(instance)
     elif args.bug_report:
         # Create ad-hoc instance
         instance = BugInstance(
@@ -86,9 +125,7 @@ def cmd_localize(args):
         if not args.repo_path:
             console.print("[red]--repo-path is required for manual bug reports[/red]")
             return
-        result = orchestrator.localize(
-            instance, repo_path=args.repo_path, verbose=True
-        )
+        result = _localize_instance(instance)
     else:
         console.print("[red]Provide --bug-report or --instance-id[/red]")
         return
@@ -97,6 +134,7 @@ def cmd_localize(args):
     if args.instance_id and instance.buggy_files:
         console.print(f"\n[bold]Ground Truth:[/bold] {instance.buggy_files}")
         from evaluation.metrics import top_n_accuracy
+
         for n in [1, 3, 5]:
             hit = top_n_accuracy(result.ranked_files, instance.buggy_files, n)
             status = "✅" if hit else "❌"
@@ -111,16 +149,10 @@ def cmd_evaluate(args):
     if getattr(args, "no_graph_rag", False):
         config.enable_graph_rag = False
 
-    retriever = None
     try:
-        from rag.retriever import CodeRetriever
-        from config import config as cfg
-        persist_dir = str(Path(cfg.rag.persist_directory))
-        retriever = CodeRetriever(persist_directory=persist_dir)
-        if not (retriever.collection and retriever.collection.count() > 0):
-            retriever = None
+        retriever = _make_retriever()
     except Exception:
-        pass
+        retriever = None
 
     orchestrator = Orchestrator(retriever=retriever)
     evaluator = BenchmarkEvaluator(orchestrator=orchestrator)
@@ -155,6 +187,8 @@ def cmd_index(args):
         persist_directory=config.rag.persist_directory,
         collection_name=config.rag.collection_name,
         embedding_model=config.embedding.model_name,
+        embedding_api_base=config.embedding.api_base,
+        embedding_api_key=config.embedding.api_key,
     )
 
     if args.clear:
@@ -177,7 +211,13 @@ def cmd_defects4j(args):
     from agents.orchestrator import Orchestrator
     from evaluation.metrics import compute_metrics, top_n_accuracy, reciprocal_rank
     from rich.table import Table
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        BarColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import threading
 
@@ -200,7 +240,9 @@ def cmd_defects4j(args):
             table.add_row(
                 bug.instance_id,
                 bug.project,
-                bug.bug_report[:60] + "..." if len(bug.bug_report) > 60 else bug.bug_report,
+                bug.bug_report[:60] + "..."
+                if len(bug.bug_report) > 60
+                else bug.bug_report,
                 ", ".join(f.split("/")[-1] for f in bug.buggy_files[:3]),
             )
         console.print(table)
@@ -223,17 +265,11 @@ def cmd_defects4j(args):
 
         if args.repo_path:
             console.print(f"\n[bold cyan]Running agent pipeline...[/bold cyan]")
-            
-            retriever = None
+
             try:
-                from rag.retriever import CodeRetriever
-                from config import config as cfg
-                persist_dir = str(P(cfg.rag.persist_directory))
-                retriever = CodeRetriever(persist_directory=persist_dir)
-                if not (retriever.collection and retriever.collection.count() > 0):
-                    retriever = None
+                retriever = _make_retriever()
             except Exception:
-                pass
+                retriever = None
 
             orchestrator = Orchestrator(retriever=retriever)
             bug_instance = to_bug_instance(bug)
@@ -275,15 +311,32 @@ def cmd_defects4j(args):
             repo = P(repo_base_path)
 
         try:
-            res = orchestrator_inst.localize(
-                bug_instance,
-                repo_path=str(repo),
-                verbose=is_verbose,
-            )
+            # Use multi-pass localization if specified
+            if getattr(args, "multi_pass", 1) > 1:
+                res = orchestrator_inst.multi_pass_localize(
+                    bug_instance,
+                    repo_path=str(repo),
+                    verbose=is_verbose,
+                    passes=getattr(args, "multi_pass"),
+                    reflection_max_rounds=getattr(args, "reflection_rounds", None),
+                    reflection_conf_threshold=getattr(
+                        args, "reflection_threshold", None
+                    ),
+                )
+            else:
+                res = orchestrator_inst.localize(
+                    bug_instance,
+                    repo_path=str(repo),
+                    verbose=is_verbose,
+                    reflection_max_rounds=getattr(args, "reflection_rounds", None),
+                    reflection_conf_threshold=getattr(
+                        args, "reflection_threshold", None
+                    ),
+                )
             r_files = res.ranked_files
             hit = top_n_accuracy(r_files, bug_obj.buggy_files, 1)
             rr = reciprocal_rank(r_files, bug_obj.buggy_files)
-            
+
             inst_dict = {
                 "instance_id": bug_obj.instance_id,
                 "predicted": r_files[:5],
@@ -291,8 +344,17 @@ def cmd_defects4j(args):
                 "rr": rr,
                 "time": res.total_time,
             }
-            return (bug_obj.instance_id, True, inst_dict, r_files, bug_obj.buggy_files, hit, rr, None)
-            
+            return (
+                bug_obj.instance_id,
+                True,
+                inst_dict,
+                r_files,
+                bug_obj.buggy_files,
+                hit,
+                rr,
+                None,
+            )
+
         except Exception as e:
             err_dict = {
                 "instance_id": bug_obj.instance_id,
@@ -301,19 +363,22 @@ def cmd_defects4j(args):
                 "rr": 0.0,
                 "time": time.time() - start_t,
             }
-            return (bug_obj.instance_id, False, err_dict, [], bug_obj.buggy_files, False, 0.0, str(e))
+            return (
+                bug_obj.instance_id,
+                False,
+                err_dict,
+                [],
+                bug_obj.buggy_files,
+                False,
+                0.0,
+                str(e),
+            )
 
     # Run pipeline
-    retriever = None
     try:
-        from rag.retriever import CodeRetriever
-        from config import config as cfg
-        persist_dir = str(P(cfg.rag.persist_directory))
-        retriever = CodeRetriever(persist_directory=persist_dir)
-        if not (retriever.collection and retriever.collection.count() > 0):
-            retriever = None
+        retriever = _make_retriever()
     except Exception:
-        pass
+        retriever = None
 
     orchestrator = Orchestrator(retriever=retriever)
     all_preds = []
@@ -321,7 +386,9 @@ def cmd_defects4j(args):
     per_instance = []
 
     workers = getattr(args, "workers", 1)
-    console.print(f"\n[bold cyan]🚀 Starting Defects4J benchmark evaluation...[/bold cyan]")
+    console.print(
+        f"\n[bold cyan]🚀 Starting Defects4J benchmark evaluation...[/bold cyan]"
+    )
     console.print(f"   Workers: {workers}")
 
     print_lock = threading.Lock()
@@ -334,20 +401,26 @@ def cmd_defects4j(args):
         TimeElapsedColumn(),
         console=console,
     ) as progress:
-        task = progress.add_task(f"Evaluating bugs ({workers} workers)", total=len(bugs))
+        task = progress.add_task(
+            f"Evaluating bugs ({workers} workers)", total=len(bugs)
+        )
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_bug = {
-                executor.submit(process_d4j_bug, bug, orchestrator, args.repo_path, args.verbose): bug
+                executor.submit(
+                    process_d4j_bug, bug, orchestrator, args.repo_path, args.verbose
+                ): bug
                 for bug in bugs
             }
-            
+
             completed_count = 0
             for future in as_completed(future_to_bug):
                 bug = future_to_bug[future]
-                
+
                 try:
-                    iid, success, inst_data, p_files, g_files, hit, rr, err = future.result()
+                    iid, success, inst_data, p_files, g_files, hit, rr, err = (
+                        future.result()
+                    )
                     all_preds.append(p_files)
                     all_gts.append(g_files)
                     per_instance.append(inst_data)
@@ -361,13 +434,19 @@ def cmd_defects4j(args):
                             )
                         else:
                             console.print(f"  [red]❌ ERROR {iid:20s}: {err}[/red]")
-                            
+
                 except Exception as exc:
                     with print_lock:
-                        console.print(f"  [red]❌ UNEXPECTED ERROR {bug.instance_id}: {exc}[/red]")
-                        
+                        console.print(
+                            f"  [red]❌ UNEXPECTED ERROR {bug.instance_id}: {exc}[/red]"
+                        )
+
                 completed_count += 1
-                progress.update(task, advance=1, description=f"[{completed_count}/{len(bugs)}] {bug.instance_id}")
+                progress.update(
+                    task,
+                    advance=1,
+                    description=f"[{completed_count}/{len(bugs)}] {bug.instance_id}",
+                )
 
     # Compute and display metrics
     metrics = compute_metrics(all_preds, all_gts, [1, 3, 5])
@@ -404,13 +483,17 @@ def cmd_defects4j(args):
     # Also export JSON
     json_path = str(out_base) + ".json"
     with open(json_path, "w") as f:
-        json.dump({
-            "dataset": "defects4j",
-            "model": config.llm.model,
-            "provider": config.llm.provider,
-            "metrics": metrics,
-            "per_instance": per_instance,
-        }, f, indent=2)
+        json.dump(
+            {
+                "dataset": "defects4j",
+                "model": config.llm.model,
+                "provider": config.llm.provider,
+                "metrics": metrics,
+                "per_instance": per_instance,
+            },
+            f,
+            indent=2,
+        )
     console.print(f"   📄 Full JSON:        {json_path}")
 
 
@@ -443,7 +526,9 @@ def cmd_bugsinpy(args):
             table.add_row(
                 bug.instance_id,
                 bug.project,
-                bug.bug_report[:60] + "..." if len(bug.bug_report) > 60 else bug.bug_report,
+                bug.bug_report[:60] + "..."
+                if len(bug.bug_report) > 60
+                else bug.bug_report,
                 ", ".join(f.split("/")[-1] for f in bug.buggy_files[:3]),
             )
         console.print(table)
@@ -502,9 +587,7 @@ def cmd_bugsinpy(args):
     per_instance = []
 
     for i, bug in enumerate(bugs):
-        console.print(
-            f"\n[bold][{i+1}/{len(bugs)}] {bug.instance_id}[/bold]"
-        )
+        console.print(f"\n[bold][{i + 1}/{len(bugs)}] {bug.instance_id}[/bold]")
         bug_instance = to_bug_instance(bug)
 
         # Construct per-bug repo path
@@ -526,13 +609,15 @@ def cmd_bugsinpy(args):
                 f"  {'✅' if hit else '❌'} RR={rr:.3f} | "
                 f"Predicted: {result.ranked_files[:3]}"
             )
-            per_instance.append({
-                "instance_id": bug.instance_id,
-                "predicted": result.ranked_files[:5],
-                "ground_truth": bug.buggy_files,
-                "rr": rr,
-                "time": result.total_time,
-            })
+            per_instance.append(
+                {
+                    "instance_id": bug.instance_id,
+                    "predicted": result.ranked_files[:5],
+                    "ground_truth": bug.buggy_files,
+                    "rr": rr,
+                    "time": result.total_time,
+                }
+            )
         except Exception as e:
             console.print(f"  [red]ERROR: {e}[/red]")
             all_preds.append([])
@@ -556,6 +641,7 @@ def cmd_bugsinpy(args):
     out_base.parent.mkdir(parents=True, exist_ok=True)
 
     from evaluation.export import export_results
+
     metadata = {
         "dataset": "bugsinpy",
         "model": config.llm.model,
@@ -568,13 +654,17 @@ def cmd_bugsinpy(args):
 
     json_path = str(out_base) + ".json"
     with open(json_path, "w") as f:
-        json.dump({
-            "dataset": "bugsinpy",
-            "model": config.llm.model,
-            "provider": config.llm.provider,
-            "metrics": metrics,
-            "per_instance": per_instance,
-        }, f, indent=2)
+        json.dump(
+            {
+                "dataset": "bugsinpy",
+                "model": config.llm.model,
+                "provider": config.llm.provider,
+                "metrics": metrics,
+                "per_instance": per_instance,
+            },
+            f,
+            indent=2,
+        )
     console.print(f"   📄 Full JSON:        {json_path}")
 
 
@@ -601,8 +691,10 @@ def cmd_graph(args):
     if args.query:
         console.print(f"\n[bold]🔍 Graph RAG Search: '{args.query}'[/bold]\n")
         result = graph_search(
-            args.query, args.repo_path,
-            top_k=args.top_k, language=args.language,
+            args.query,
+            args.repo_path,
+            top_k=args.top_k,
+            language=args.language,
         )
         console.print(result)
 
@@ -616,8 +708,19 @@ def cmd_graph(args):
         result = find_callees(args.callees, args.repo_path, language=args.language)
         console.print(result)
 
-    if not any([args.stats, args.query, args.callers, args.callees, args.visualize, args.backend == "neo4j"]):
-        console.print("\n[yellow]💡 Use --stats, --query, --callers, --callees, --visualize, or --backend neo4j to explore the graph.[/yellow]")
+    if not any(
+        [
+            args.stats,
+            args.query,
+            args.callers,
+            args.callees,
+            args.visualize,
+            args.backend == "neo4j",
+        ]
+    ):
+        console.print(
+            "\n[yellow]💡 Use --stats, --query, --callers, --callees, --visualize, or --backend neo4j to explore the graph.[/yellow]"
+        )
 
     # Neo4j export
     if args.backend == "neo4j":
@@ -635,10 +738,18 @@ def cmd_graph(args):
             neo4j_stats = neo4j_graph.stats()
 
             console.print(f"[green]✅ Neo4j import complete![/green]")
-            console.print(f"   Nodes: {neo4j_stats['total_nodes']}  |  Edges: {neo4j_stats['total_edges']}")
-            console.print(f"\n[bold]🌐 Open Neo4j Browser:[/bold] http://localhost:7474")
-            console.print(f"[dim]   Try: MATCH (n:CodeNode)-[r]->(m) RETURN n, r, m LIMIT 50[/dim]")
-            console.print(f"[dim]   Try: MATCH (n {{name:'createNumber'}})-[:CALLS]->(m) RETURN n, m[/dim]")
+            console.print(
+                f"   Nodes: {neo4j_stats['total_nodes']}  |  Edges: {neo4j_stats['total_edges']}"
+            )
+            console.print(
+                f"\n[bold]🌐 Open Neo4j Browser:[/bold] http://localhost:7474"
+            )
+            console.print(
+                f"[dim]   Try: MATCH (n:CodeNode)-[r]->(m) RETURN n, r, m LIMIT 50[/dim]"
+            )
+            console.print(
+                f"[dim]   Try: MATCH (n {{name:'createNumber'}})-[:CALLS]->(m) RETURN n, m[/dim]"
+            )
 
             neo4j_graph.close()
         except ConnectionError as e:
@@ -682,7 +793,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--log-level", default=config.log_level,
+        "--log-level",
+        default=config.log_level,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level",
     )
@@ -695,14 +807,36 @@ def main():
     loc_parser.add_argument("--repo-path", type=str, help="Path to repository")
     loc_parser.add_argument("--instance-id", type=str, help="SWE-bench instance ID")
     loc_parser.add_argument("--dataset", type=str, help="Dataset name override")
-    loc_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
+    loc_parser.add_argument(
+        "--no-graph-rag", action="store_true", help="Disable Graph RAG"
+    )
+    loc_parser.add_argument(
+        "--multi-pass",
+        type=int,
+        default=1,
+        help="Run Best-of-N localization (2-3 recommended)",
+    )
+    loc_parser.add_argument(
+        "--reflection-rounds",
+        type=int,
+        default=None,
+        help="Max extra Navigation+Confirmation rounds after low confidence (0-2; default from REFLECTION_MAX_ROUNDS)",
+    )
+    loc_parser.add_argument(
+        "--reflection-threshold",
+        type=float,
+        default=None,
+        help="Minimum top-1 confidence to skip reflection (default from REFLECTION_CONF_THRESHOLD)",
+    )
 
     # evaluate command
     eval_parser = subparsers.add_parser("evaluate", help="Run benchmark evaluation")
     eval_parser.add_argument("--limit", type=int, help="Max instances to evaluate")
     eval_parser.add_argument("--output", type=str, help="Output JSON path")
     eval_parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    eval_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
+    eval_parser.add_argument(
+        "--no-graph-rag", action="store_true", help="Disable Graph RAG"
+    )
 
     # index command
     idx_parser = subparsers.add_parser("index", help="Index codebase for RAG")
@@ -710,42 +844,149 @@ def main():
     idx_parser.add_argument("--clear", action="store_true", help="Clear existing index")
 
     # graph command
-    graph_parser = subparsers.add_parser("graph", help="Build & query Code Property Graph (Graph RAG)")
-    graph_parser.add_argument("--repo-path", type=str, required=True, help="Path to repository")
-    graph_parser.add_argument("--language", type=str, default="auto", choices=["auto", "python", "java"], help="Language hint")
+    graph_parser = subparsers.add_parser(
+        "graph", help="Build & query Code Property Graph (Graph RAG)"
+    )
+    graph_parser.add_argument(
+        "--repo-path", type=str, required=True, help="Path to repository"
+    )
+    graph_parser.add_argument(
+        "--language",
+        type=str,
+        default="auto",
+        choices=["auto", "python", "java"],
+        help="Language hint",
+    )
     graph_parser.add_argument("--query", type=str, help="Search query for Graph RAG")
     graph_parser.add_argument("--callers", type=str, help="Find callers of a function")
     graph_parser.add_argument("--callees", type=str, help="Find callees of a function")
-    graph_parser.add_argument("--stats", action="store_true", help="Show graph statistics")
-    graph_parser.add_argument("--visualize", action="store_true", help="Generate interactive HTML + static PNG graph visualization")
-    graph_parser.add_argument("--focus-file", type=str, help="Focus visualization on a specific file path (substring match)")
+    graph_parser.add_argument(
+        "--stats", action="store_true", help="Show graph statistics"
+    )
+    graph_parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Generate interactive HTML + static PNG graph visualization",
+    )
+    graph_parser.add_argument(
+        "--focus-file",
+        type=str,
+        help="Focus visualization on a specific file path (substring match)",
+    )
     graph_parser.add_argument("--top-k", type=int, default=10, help="Number of results")
-    graph_parser.add_argument("--backend", type=str, default="memory", choices=["memory", "neo4j"], help="Graph storage backend (default: memory)")
-    graph_parser.add_argument("--neo4j-uri", type=str, default="bolt://localhost:7687", help="Neo4j Bolt URI")
-    graph_parser.add_argument("--neo4j-password", type=str, default="password", help="Neo4j password")
+    graph_parser.add_argument(
+        "--backend",
+        type=str,
+        default="memory",
+        choices=["memory", "neo4j"],
+        help="Graph storage backend (default: memory)",
+    )
+    graph_parser.add_argument(
+        "--neo4j-uri", type=str, default="bolt://localhost:7687", help="Neo4j Bolt URI"
+    )
+    graph_parser.add_argument(
+        "--neo4j-password", type=str, default="password", help="Neo4j password"
+    )
 
     # defects4j command
-    d4j_parser = subparsers.add_parser("defects4j", help="Evaluate on Defects4J benchmark")
-    d4j_parser.add_argument("--project", type=str, help="Project name (Lang, Math, Closure, Mockito, Time)")
-    d4j_parser.add_argument("--instance-id", type=str, help="Single instance ID (e.g. Lang_1)")
-    d4j_parser.add_argument("--repo-path", type=str, help="Path to checked-out buggy repo")
+    d4j_parser = subparsers.add_parser(
+        "defects4j", help="Evaluate on Defects4J benchmark"
+    )
+    d4j_parser.add_argument(
+        "--project", type=str, help="Project name (Lang, Math, Closure, Mockito, Time)"
+    )
+    d4j_parser.add_argument(
+        "--instance-id", type=str, help="Single instance ID (e.g. Lang_1)"
+    )
+    d4j_parser.add_argument(
+        "--repo-path", type=str, help="Path to checked-out buggy repo"
+    )
     d4j_parser.add_argument("--limit", type=int, help="Max instances to evaluate")
-    d4j_parser.add_argument("--workers", type=int, default=1, help="Number of concurrent bug evaluations (default 1)")
+    d4j_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of concurrent bug evaluations (default 1)",
+    )
     d4j_parser.add_argument("--output", type=str, help="Output JSON path")
     d4j_parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    d4j_parser.add_argument("--list-bugs", action="store_true", help="Just list available bugs")
-    d4j_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
+    d4j_parser.add_argument(
+        "--list-bugs", action="store_true", help="Just list available bugs"
+    )
+    d4j_parser.add_argument(
+        "--no-graph-rag", action="store_true", help="Disable Graph RAG"
+    )
+    d4j_parser.add_argument(
+        "--multi-pass",
+        type=int,
+        default=1,
+        help="Run Best-of-N localization (2-3 recommended)",
+    )
+    d4j_parser.add_argument(
+        "--reflection-rounds",
+        type=int,
+        default=None,
+        help="Max extra Navigation+Confirmation rounds after low confidence (0-2; default from REFLECTION_MAX_ROUNDS)",
+    )
+    d4j_parser.add_argument(
+        "--reflection-threshold",
+        type=float,
+        default=None,
+        help="Minimum top-1 confidence to skip reflection (default from REFLECTION_CONF_THRESHOLD)",
+    )
 
     # bugsinpy command
-    bip_parser = subparsers.add_parser("bugsinpy", help="Evaluate on BugsInPy benchmark (Python)")
-    bip_parser.add_argument("--project", type=str, help="Project name (thefuck, pandas, fastapi, etc.)")
-    bip_parser.add_argument("--instance-id", type=str, help="Single instance ID (e.g. thefuck_1)")
-    bip_parser.add_argument("--repo-path", type=str, help="Path to checked-out buggy repo")
+    bip_parser = subparsers.add_parser(
+        "bugsinpy", help="Evaluate on BugsInPy benchmark (Python)"
+    )
+    bip_parser.add_argument(
+        "--project", type=str, help="Project name (thefuck, pandas, fastapi, etc.)"
+    )
+    bip_parser.add_argument(
+        "--instance-id", type=str, help="Single instance ID (e.g. thefuck_1)"
+    )
+    bip_parser.add_argument(
+        "--repo-path", type=str, help="Path to checked-out buggy repo"
+    )
     bip_parser.add_argument("--limit", type=int, help="Max instances to evaluate")
     bip_parser.add_argument("--output", type=str, help="Output JSON path")
     bip_parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    bip_parser.add_argument("--list-bugs", action="store_true", help="Just list available bugs")
-    bip_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
+    bip_parser.add_argument(
+        "--list-bugs", action="store_true", help="Just list available bugs"
+    )
+    bip_parser.add_argument(
+        "--no-graph-rag", action="store_true", help="Disable Graph RAG"
+    )
+
+    # swebench command
+    swe_parser = subparsers.add_parser(
+        "swebench", help="Evaluate on SWE-bench benchmark"
+    )
+    swe_parser.add_argument(
+        "--dataset",
+        type=str,
+        default=config.evaluation.dataset_name,
+        help="SWE-bench dataset to use",
+    )
+    swe_parser.add_argument(
+        "--split", type=str, default="test", help="Dataset split (default: test)"
+    )
+    swe_parser.add_argument("--instance-id", type=str, help="Single instance ID")
+    swe_parser.add_argument("--limit", type=int, help="Max instances to evaluate")
+    swe_parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of concurrent bug evaluations (default 1)",
+    )
+    swe_parser.add_argument("--output", type=str, help="Output result path base")
+    swe_parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    swe_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview bugs without running"
+    )
+    swe_parser.add_argument(
+        "--no-graph-rag", action="store_true", help="Disable Graph RAG"
+    )
 
     args = parser.parse_args()
     setup_logging(args.log_level)
@@ -761,9 +1002,27 @@ def main():
         "graph": cmd_graph,
         "defects4j": cmd_defects4j,
         "bugsinpy": cmd_bugsinpy,
+        "swebench": cmd_swebench,
     }
 
     commands[args.command](args)
+
+
+def cmd_swebench(args):
+    """Evaluate on SWE-bench benchmark by calling the separate runner script."""
+    import importlib.util
+
+    if getattr(args, "no_graph_rag", False):
+        config.enable_graph_rag = False
+
+    # Importing the runner script dynamically to avoid circular dependencies or massive main.py
+    script_path = str(Path(__file__).parent / "scripts" / "run_swebench_benchmark.py")
+    spec = importlib.util.spec_from_file_location("run_swebench", script_path)
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules["run_swebench"] = runner
+    spec.loader.exec_module(runner)
+
+    runner.run_benchmark(args)
 
 
 if __name__ == "__main__":

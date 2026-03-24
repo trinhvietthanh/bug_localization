@@ -35,6 +35,14 @@ For each candidate location:
 3. Check for common bug patterns: off-by-one, wrong conditions, missing checks, etc.
 4. Consider the data flow and control flow
 5. Assess how well the code matches the reported behavior
+6. For each top candidate, reason explicitly:
+   (a) Does this code match the reported behavior?
+   (b) Would changing this location plausibly fix the bug?
+   (c) Is there a stronger alternative location?
+
+If the provided candidates are weak or inconclusive, do NOT just reorder them.
+Actively discover new candidates using code_search and semantic_search, then validate them.
+Follow callers/callees of suspicious methods to identify nearby true fault locations.
 
 IMPORTANT TIP: Bug reports frequently contain typos (e.g., `ExtendedBufferReader` instead of `ExtendedBufferedReader`). If `code_search` returns 0 results for a class or method name mentioned in the bug report, DO NOT just give up or keep trying exact matches. Immediately use `semantic_search` with the same term, or use `code_search` with partial/fuzzy Regex matching.
 
@@ -136,9 +144,9 @@ class ConfirmationAgent(BaseAgent):
             "",
         ]
 
-        # Get navigation results from traces
+        # Latest navigation round (after reflection retries)
         nav_results = None
-        for trace in context.agent_traces:
+        for trace in reversed(context.agent_traces):
             if trace.get("action") == "navigation_results":
                 nav_results = trace.get("result", "")
                 break
@@ -162,9 +170,10 @@ class ConfirmationAgent(BaseAgent):
 
         parts.append(
             "\nPlease carefully review each candidate location by reading "
-            "the actual source code. Analyze the code logic against the bug "
-            "description. Then provide your final ranked results with "
-            "detailed explanations as a JSON block."
+            "the actual source code. For each strong candidate, reason step by step: "
+            "(1) match to reported behavior, (2) whether a fix here would address the bug, "
+            "(3) whether another location is more likely. If candidates are weak, use "
+            "code_search and semantic_search to find and rank NEW file paths before final JSON."
         )
 
         return "\n".join(parts)
@@ -201,3 +210,34 @@ class ConfirmationAgent(BaseAgent):
                 f"[ConfirmationAgent] Top-1: {top.get('file_path', '?')} "
                 f"({top.get('confidence', 0):.2f})"
             )
+
+    def get_reflection_message(self, result: AgentResult, confidence_threshold: float) -> str:
+        """
+        Produce reflection guidance for a retry round when confidence is low.
+        """
+        ranked = result.output.get("ranked_locations", []) if result.output else []
+        top_conf = 0.0
+        if ranked:
+            try:
+                top_conf = float(ranked[0].get("confidence", 0.0))
+            except (TypeError, ValueError):
+                top_conf = 0.0
+
+        weak_candidates = [loc.get("file_path", "?") for loc in ranked[:5]]
+        if weak_candidates:
+            investigated = ", ".join(weak_candidates)
+        else:
+            investigated = "no convincing locations were validated"
+
+        analysis = ""
+        if result.output:
+            oa = result.output.get("overall_analysis") or ""
+            if isinstance(oa, str) and oa.strip():
+                analysis = f" Prior analysis: {oa.strip()[:600]}"
+
+        return (
+            f"I could not confirm any strong candidate (top confidence={top_conf:.2f}, "
+            f"threshold={confidence_threshold:.2f}). Investigated but inconclusive: "
+            f"{investigated}.{analysis} Re-investigate with broader semantic search, prioritize "
+            "stack-trace-linked files, and verify caller/callee chains around likely methods."
+        )

@@ -20,53 +20,9 @@ PROJECT_CONFIGS = {
         "repo_url": "https://github.com/jfree/jfreechart.git",
         "repo_name": "jfreechart-repo",
     },
-    "Cli": {
-        "repo_url": "https://github.com/apache/commons-cli.git",
-        "repo_name": "commons-cli-repo",
-    },
     "Closure": {
         "repo_url": "https://github.com/google/closure-compiler.git",
         "repo_name": "closure-compiler-repo",
-    },
-    "Codec": {
-        "repo_url": "https://github.com/apache/commons-codec.git",
-        "repo_name": "commons-codec-repo",
-    },
-    "Collections": {
-        "repo_url": "https://github.com/apache/commons-collections.git",
-        "repo_name": "commons-collections-repo",
-    },
-    "Compress": {
-        "repo_url": "https://github.com/apache/commons-compress.git",
-        "repo_name": "commons-compress-repo",
-    },
-    "Csv": {
-        "repo_url": "https://github.com/apache/commons-csv.git",
-        "repo_name": "commons-csv-repo",
-    },
-    "Gson": {
-        "repo_url": "https://github.com/google/gson.git",
-        "repo_name": "gson-repo",
-    },
-    "JacksonCore": {
-        "repo_url": "https://github.com/FasterXML/jackson-core.git",
-        "repo_name": "jackson-core-repo",
-    },
-    "JacksonDatabind": {
-        "repo_url": "https://github.com/FasterXML/jackson-databind.git",
-        "repo_name": "jackson-databind-repo",
-    },
-    "JacksonXml": {
-        "repo_url": "https://github.com/FasterXML/jackson-dataformat-xml.git",
-        "repo_name": "jackson-dataformat-xml-repo",
-    },
-    "Jsoup": {
-        "repo_url": "https://github.com/jhy/jsoup.git",
-        "repo_name": "jsoup-repo",
-    },
-    "JxPath": {
-        "repo_url": "https://github.com/apache/commons-jxpath.git",
-        "repo_name": "commons-jxpath-repo",
     },
     "Lang": {
         "repo_url": "https://github.com/apache/commons-lang.git",
