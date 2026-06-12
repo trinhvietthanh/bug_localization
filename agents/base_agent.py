@@ -3,19 +3,42 @@ Base agent class for the multi-agent bug localization system.
 Provides common LLM interaction, tool execution, and structured output.
 """
 
+import inspect
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from openai import OpenAI
 
 from config import config
 
 logger = logging.getLogger(__name__)
+
+# Max characters returned from any single tool call that will be sent into the
+# LLM message history.  Keeping this small prevents quadratic prompt-token growth
+# across many iterations.  ~8 000 chars ≈ ~2 000 tokens.
+MAX_TOOL_OUTPUT_CHARS: int = int(os.environ.get("MAX_TOOL_OUTPUT_CHARS", "8000"))
+
+# Maximum number of messages kept in the running history (system prompt + N most recent).
+# Prevents quadratic prompt-token growth over many iterations.  Set to 0 to disable.
+MAX_MSG_HISTORY: int = int(os.environ.get("MAX_MSG_HISTORY", "20"))
+
+# Maximum total characters across ALL tool results appended in a single iteration.
+# With N parallel tool calls each returning MAX_TOOL_OUTPUT_CHARS, the combined
+# output can dwarf the effective context window.  Results that push past this
+# budget are truncated more aggressively before being appended.
+# Default: 2× MAX_TOOL_OUTPUT_CHARS — enough for 2 full-size or 4 half-size results.
+MAX_ITER_TOOL_CHARS: int = int(os.environ.get("MAX_ITER_TOOL_CHARS", str(MAX_TOOL_OUTPUT_CHARS * 2)))
+
+# Maximum total characters across all messages sent to the LLM in one call.
+# Prevents context-window overflow even when individual messages are large.
+# ~200 000 chars ≈ 50 000 tokens (rough 4-char/token estimate).
+MAX_CONTEXT_CHARS: int = int(os.environ.get("MAX_CONTEXT_CHARS", "200000"))
 
 # Shared LLM client singleton — avoids creating separate connections per agent
 _shared_clients: dict[str, OpenAI] = {}
@@ -26,6 +49,7 @@ class AgentContext:
     """Shared context passed between agents."""
     # Bug report info
     instance_id: str = ""
+    repo_id: str = ""  # Identifier used for RAG filtering (e.g., "Chart_3")
     problem_statement: str = ""
     repo_path: str = ""
 
@@ -42,11 +66,8 @@ class AgentContext:
     candidate_methods: list = field(default_factory=list)
     repo_skeleton: str = ""
     reflection_feedback: str = ""
-    reflection_round: int = 0
-
     # Agent trace / memory
     agent_traces: list = field(default_factory=list)
-    tool_call_history: list = field(default_factory=list)
 
     # Repository specifics
     language: str = "python"
@@ -58,6 +79,24 @@ class AgentContext:
     # Graph RAG retriever (if available)
     graph_retriever: Any = None
 
+    # Optional per-invocation temperature override (avoids mutating global config)
+    temperature_override: float | None = None
+
+    # High-priority files extracted directly from stack traces (subset of mentioned_files)
+    stack_trace_files: list[str] = field(default_factory=list)
+
+    # Drain3 log parse result — structured templates, assertion failures, search terms
+    log_parse_result: Any = None  # tools.log_parser.LogParseResult (lazy to avoid circular import)
+
+    # Source root hint (e.g. "source" for old Ant-layout Chart, "src/main/java" for Maven)
+    source_root: str = ""
+
+    # Test-class-derived candidate files (e.g. from "WeekTests" -> "Week.java")
+    test_derived_candidates: list[str] = field(default_factory=list)
+
+    # Structured bug info extracted by ComprehensionAgent pre-step (BugCerberus-style)
+    structured_bug_info: dict = field(default_factory=dict)
+
     def add_trace(self, agent_name: str, action: str, result: str):
         """Add an entry to the agent trace."""
         self.agent_traces.append({
@@ -65,13 +104,6 @@ class AgentContext:
             "action": action,
             "result": result[:500],  # Truncate long results
         })
-
-    def get_trace_summary(self) -> str:
-        """Get a summary of all agent traces."""
-        lines = []
-        for t in self.agent_traces:
-            lines.append(f"[{t['agent']}] {t['action']}: {t['result'][:200]}")
-        return "\n".join(lines)
 
 
 @dataclass
@@ -84,6 +116,10 @@ class AgentResult:
     error: str = ""
     num_llm_calls: int = 0
     num_tool_calls: int = 0
+    # Token usage (prompt / completion / total)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
 
 class BaseAgent(ABC):
@@ -138,6 +174,13 @@ class BaseAgent(ABC):
     def register_tool(self, name: str, func: callable, schema: dict):
         """Register a tool the agent can use."""
         self.tools[name] = func
+        
+        # Prevent duplication in tool_schemas
+        self.tool_schemas = [
+            s for s in self.tool_schemas 
+            if s.get("function", {}).get("name") != schema.get("name", name)
+        ]
+        
         self.tool_schemas.append({
             "type": "function",
             "function": schema,
@@ -165,8 +208,14 @@ class BaseAgent(ABC):
 
             # Call LLM
             try:
-                response = self._call_llm(messages)
+                response = self._call_llm(messages, context)
                 result.num_llm_calls += 1
+                # Accumulate token usage (may be None for some providers)
+                usage = getattr(response, "usage", None)
+                if usage:
+                    result.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                    result.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+                    result.total_tokens += getattr(usage, "total_tokens", 0) or 0
             except Exception as e:
                 logger.error(f"[{self.name}] LLM call failed: {e}")
                 result.success = False
@@ -177,7 +226,23 @@ class BaseAgent(ABC):
 
             # Check if the model wants to call tools
             if assistant_msg.tool_calls:
-                messages.append(assistant_msg)
+                # Append as plain dict so _trim_messages (and the API on the next
+                # call) can handle it uniformly. Only keep fields the API needs.
+                messages.append({
+                    "role": assistant_msg.role,
+                    "content": assistant_msg.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in assistant_msg.tool_calls
+                    ],
+                })
 
                 tool_calls = assistant_msg.tool_calls
                 num_calls = len(tool_calls)
@@ -197,6 +262,7 @@ class BaseAgent(ABC):
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
+                        "name": tool_name,  # Required by some Gemini/Vertex endpoints
                         "content": str(tool_result),
                     })
                 else:
@@ -221,15 +287,35 @@ class BaseAgent(ABC):
                             tc = future_to_tc[future]
                             tool_results[tc.id] = future.result()
 
-                    # Append results in original order to preserve message sequence
+                    # Append results in original order to preserve message sequence.
+                    # Apply a per-iteration char budget: if the combined output of all
+                    # parallel results would exceed MAX_ITER_TOOL_CHARS, truncate the
+                    # later results more aggressively so the window doesn't balloon.
+                    iter_chars_used = 0
                     for tc, tool_name, _ in parsed_calls:
-                        tr = tool_results[tc.id]
-                        context.add_trace(self.name, f"tool:{tool_name}", str(tr)[:300])
+                        tr = str(tool_results[tc.id])
+                        remaining_budget = MAX_ITER_TOOL_CHARS - iter_chars_used
+                        if remaining_budget <= 0:
+                            tr = f"[result omitted — per-iteration tool budget ({MAX_ITER_TOOL_CHARS:,} chars) reached]"
+                        elif len(tr) > remaining_budget:
+                            tr = (
+                                tr[:remaining_budget]
+                                + f"\n... [truncated — budget {MAX_ITER_TOOL_CHARS:,} chars/iter reached]"
+                            )
+                        iter_chars_used += len(tr)
+                        context.add_trace(self.name, f"tool:{tool_name}", tr[:300])
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
-                            "content": str(tr),
+                            "name": tool_name,  # Required by some Gemini/Vertex endpoints
+                            "content": tr,
                         })
+
+                # Sliding-window trim fires HERE — after all tool results for this
+                # iteration are appended — so the next LLM call always sees a
+                # bounded history regardless of how many parallel tools ran.
+                if MAX_MSG_HISTORY > 0:
+                    messages = self._trim_messages(messages, MAX_MSG_HISTORY)
 
             else:
                 # No tool calls — this is the final response
@@ -253,12 +339,52 @@ class BaseAgent(ABC):
         result.error = f"Exceeded maximum iterations ({max_iterations})"
         return result
 
-    def _call_llm(self, messages: list[dict]) -> Any:
+    @staticmethod
+    def _trim_messages(messages: list[dict], max_messages: int) -> list[dict]:
+        """
+        Trim message history by both message count and character budget.
+
+        Always keeps the system prompt (messages[0]).
+        1. Applies message-count limit (sliding window).
+        2. Applies MAX_CONTEXT_CHARS budget: removes oldest non-system messages
+           until total characters fit within the budget.
+        """
+        if len(messages) <= 1:
+            return messages
+
+        system = messages[0]
+        rest = list(messages[1:])
+
+        # Step 1: message count limit
+        if len(rest) >= max_messages:
+            rest = rest[-(max_messages - 1):]
+
+        # Step 2: character budget (trim oldest messages when over budget)
+        if MAX_CONTEXT_CHARS > 0:
+            def _msg_chars(m: dict) -> int:
+                content = m.get("content") or ""
+                if isinstance(content, str):
+                    return len(content)
+                if isinstance(content, list):
+                    return sum(len(b.get("text", "")) for b in content if isinstance(b, dict))
+                return 0
+
+            total_chars = _msg_chars(system) + sum(_msg_chars(m) for m in rest)
+            while len(rest) > 1 and total_chars > MAX_CONTEXT_CHARS:
+                removed = rest.pop(0)
+                total_chars -= _msg_chars(removed)
+
+        return [system] + rest
+
+    def _call_llm(self, messages: list[dict], context: AgentContext | None = None) -> Any:
         """Make an LLM API call."""
+        temperature = config.llm.temperature
+        if context is not None and context.temperature_override is not None:
+            temperature = context.temperature_override
         kwargs = {
             "model": config.llm.model,
             "messages": messages,
-            "temperature": config.llm.temperature,
+            "temperature": temperature,
             "max_tokens": config.llm.max_tokens,
         }
 
@@ -266,7 +392,8 @@ class BaseAgent(ABC):
             kwargs["tools"] = self.tool_schemas
             kwargs["tool_choice"] = "auto"
 
-        return self.client.chat.completions.create(**kwargs)
+        call_timeout = config.llm_call_timeout if config.llm_call_timeout > 0 else None
+        return self.client.chat.completions.create(**kwargs, timeout=call_timeout)
 
     def _execute_tool(
         self,
@@ -274,27 +401,38 @@ class BaseAgent(ABC):
         tool_args: dict,
         context: AgentContext,
     ) -> str:
-        """Execute a registered tool."""
+        """Execute a registered tool and cap its output to MAX_TOOL_OUTPUT_CHARS."""
         if tool_name not in self.tools:
             return f"Error: Unknown tool '{tool_name}'"
 
         try:
             func = self.tools[tool_name]
 
-            # Inject repo_path if needed
-            if "repo_path" in func.__code__.co_varnames and "repo_path" not in tool_args:
+            # Inject context-provided dependencies based on declared function parameters.
+            # Using inspect.signature ensures we only match actual parameters, not local
+            # variables that happen to share a name (co_varnames includes both).
+            sig_params = inspect.signature(func).parameters
+            if "repo_path" in sig_params and "repo_path" not in tool_args:
                 tool_args["repo_path"] = context.repo_path
 
-            # Inject retriever if needed
-            if "retriever" in func.__code__.co_varnames and "retriever" not in tool_args:
+            if "retriever" in sig_params and "retriever" not in tool_args:
                 tool_args["retriever"] = context.retriever
 
-            # Inject graph_retriever if needed
-            if "graph_retriever" in func.__code__.co_varnames and "graph_retriever" not in tool_args:
+            if "graph_retriever" in sig_params and "graph_retriever" not in tool_args:
                 tool_args["graph_retriever"] = context.graph_retriever
 
-            result = func(**tool_args)
-            return str(result)
+            if "repo_filter" in sig_params and "repo_filter" not in tool_args:
+                tool_args["repo_filter"] = context.repo_id
+
+            result = str(func(**tool_args))
+
+            # Truncate output to prevent quadratic prompt-token growth across iterations
+            if len(result) > MAX_TOOL_OUTPUT_CHARS:
+                result = (
+                    result[:MAX_TOOL_OUTPUT_CHARS]
+                    + f"\n... [truncated — {len(result):,} chars total, showing first {MAX_TOOL_OUTPUT_CHARS:,}]"
+                )
+            return result
 
         except Exception as e:
             logger.error(f"Tool '{tool_name}' failed: {e}")
@@ -302,6 +440,7 @@ class BaseAgent(ABC):
 
     def _parse_output(self, content: str) -> dict:
         """Try to parse JSON from the LLM's final response."""
+        # 1. Try fenced JSON block
         json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
         if json_match:
             try:
@@ -309,7 +448,23 @@ class BaseAgent(ABC):
             except json.JSONDecodeError:
                 pass
 
-        # Try parsing the entire content as JSON
+        # 2. Try any fenced code block (model may omit 'json' label)
+        code_match = re.search(r'```\s*(\{.*?\})\s*```', content, re.DOTALL)
+        if code_match:
+            try:
+                return json.loads(code_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 3. Try finding a bare JSON object in the text
+        brace_match = re.search(r'\{[\s\S]*"ranked_locations"[\s\S]*\}', content)
+        if brace_match:
+            try:
+                return json.loads(brace_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        # 4. Try parsing the entire content as JSON
         try:
             return json.loads(content)
         except (json.JSONDecodeError, ValueError):

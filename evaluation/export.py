@@ -4,7 +4,6 @@ Supports exporting evaluation results to CSV and JSON formats.
 """
 
 import csv
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -46,16 +45,27 @@ def export_per_instance_csv(
         "top3_hit",
         "top5_hit",
         "reciprocal_rank",
+        "method_top1_hit",
+        "method_top3_hit",
+        "method_top5_hit",
+        "method_reciprocal_rank",
         "predicted_file_1",
         "predicted_file_2",
         "predicted_file_3",
         "predicted_file_4",
         "predicted_file_5",
+        "predicted_method_1",
+        "predicted_method_2",
+        "predicted_method_3",
         "ground_truth_files",
+        "ground_truth_methods",
         "num_predicted",
         "time_seconds",
         "llm_calls",
         "tool_calls",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
         "root_cause",
         "explanation",
     ]
@@ -71,10 +81,13 @@ def export_per_instance_csv(
 
         for row_data in per_instance:
             predicted = row_data.get("predicted", [])
+            predicted_methods = row_data.get("predicted_methods", [])
             ground_truth = row_data.get("ground_truth", [])
+            ground_truth_methods = row_data.get("ground_truth_methods", [])
             rr = row_data.get("rr", 0.0)
+            m_rr = row_data.get("method_rr", 0.0)
 
-            # Compute top-n hits
+            # Compute file-level top-n hits
             gt_basenames = {Path(g).name for g in ground_truth}
             gt_set = set(ground_truth)
 
@@ -87,7 +100,19 @@ def export_per_instance_csv(
             top3 = any(_matches(p) for p in predicted[:3])
             top5 = any(_matches(p) for p in predicted[:5])
 
-            # Extract project from instance_id
+            # Compute method-level top-n hits (simple substring match)
+            def _method_in_gt(pred_m, gt_list, n):
+                for pm in pred_m[:n]:
+                    pm_lower = pm.lower()
+                    for gm in gt_list:
+                        if pm_lower in gm.lower() or gm.lower() in pm_lower:
+                            return True
+                return False
+
+            m_top1 = _method_in_gt(predicted_methods, ground_truth_methods, 1) if ground_truth_methods else False
+            m_top3 = _method_in_gt(predicted_methods, ground_truth_methods, 3) if ground_truth_methods else False
+            m_top5 = _method_in_gt(predicted_methods, ground_truth_methods, 5) if ground_truth_methods else False
+
             inst_id = row_data.get("instance_id", "")
             project = inst_id.split("_")[0] if "_" in inst_id else ""
 
@@ -99,16 +124,27 @@ def export_per_instance_csv(
                 "top3_hit": int(top3),
                 "top5_hit": int(top5),
                 "reciprocal_rank": round(rr, 4),
+                "method_top1_hit": int(m_top1),
+                "method_top3_hit": int(m_top3),
+                "method_top5_hit": int(m_top5),
+                "method_reciprocal_rank": round(m_rr, 4),
                 "predicted_file_1": predicted[0] if len(predicted) > 0 else "",
                 "predicted_file_2": predicted[1] if len(predicted) > 1 else "",
                 "predicted_file_3": predicted[2] if len(predicted) > 2 else "",
                 "predicted_file_4": predicted[3] if len(predicted) > 3 else "",
                 "predicted_file_5": predicted[4] if len(predicted) > 4 else "",
+                "predicted_method_1": predicted_methods[0] if len(predicted_methods) > 0 else "",
+                "predicted_method_2": predicted_methods[1] if len(predicted_methods) > 1 else "",
+                "predicted_method_3": predicted_methods[2] if len(predicted_methods) > 2 else "",
                 "ground_truth_files": "; ".join(ground_truth),
+                "ground_truth_methods": "; ".join(ground_truth_methods),
                 "num_predicted": len(predicted),
                 "time_seconds": round(row_data.get("time", 0), 2),
                 "llm_calls": row_data.get("llm_calls", ""),
                 "tool_calls": row_data.get("tool_calls", ""),
+                "prompt_tokens": row_data.get("prompt_tokens", ""),
+                "completion_tokens": row_data.get("completion_tokens", ""),
+                "total_tokens": row_data.get("total_tokens", ""),
                 "root_cause": _clean_text(row_data.get("root_cause", "")),
                 "explanation": _clean_text(row_data.get("explanation", "")),
             }

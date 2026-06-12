@@ -5,7 +5,6 @@ Provides git log and git blame functionality.
 
 import logging
 import subprocess
-from pathlib import Path
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -119,71 +118,6 @@ def git_log_formatted(
         lines.append("")
 
     return "\n".join(lines)
-
-
-def git_blame(
-    repo_path: str,
-    file_path: str,
-    start_line: int = None,
-    end_line: int = None,
-) -> str:
-    """
-    Get git blame for a file or line range.
-
-    Args:
-        repo_path: Path to the repository
-        file_path: Relative path to the file
-        start_line: Optional start line
-        end_line: Optional end line
-
-    Returns:
-        Formatted blame output
-    """
-    cmd = ["git", "blame", "--line-porcelain"]
-
-    if start_line and end_line:
-        cmd.extend([f"-L{start_line},{end_line}"])
-    elif start_line:
-        cmd.extend([f"-L{start_line},+20"])
-
-    cmd.append(file_path)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            return f"git blame failed: {result.stderr}"
-    except subprocess.TimeoutExpired:
-        return "git blame timed out"
-    except FileNotFoundError:
-        return "git not found"
-
-    # Parse porcelain output into readable format
-    lines = []
-    current = {}
-    for line in result.stdout.split("\n"):
-        if line.startswith("\t"):
-            # This is the actual code line
-            code = line[1:]
-            commit = current.get("hash", "?")[:8]
-            author = current.get("author", "?")
-            lines.append(f"{commit} ({author:>15}) | {code}")
-            current = {}
-        elif " " in line:
-            parts = line.split(" ", 1)
-            key = parts[0]
-            value = parts[1] if len(parts) > 1 else ""
-            if len(key) == 40:  # commit hash
-                current["hash"] = key
-            elif key == "author":
-                current["author"] = value
-
-    return "\n".join(lines) if lines else "No blame data available"
 
 
 # Tool description for LLM agents

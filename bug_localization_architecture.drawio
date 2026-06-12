@@ -1,0 +1,180 @@
+<mxfile host="app.diagrams.net" modified="2026-05-15T07:00:00.000Z" agent="Claude" version="21.6.5" type="device">
+  <diagram name="Bug Localization System Architecture" id="buglocarch">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- TITLE -->
+        <mxCell id="title" value="Bug Localization System — Multi-Agent Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=20;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="90" y="10" width="780" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== MAIN PIPELINE ==================== -->
+
+        <!-- BugInstance INPUT -->
+        <mxCell id="buginst" value="&lt;b&gt;BugInstance&lt;/b&gt;&lt;br&gt;instance_id · problem_statement · base_commit · patch · buggy_files" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="130" y="65" width="420" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" source="buginst" target="preproc" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- PREPROCESSOR -->
+        <mxCell id="preproc" value="&lt;b&gt;BugReportPreprocessor&lt;/b&gt; (regex-based)&lt;br&gt;stack_traces · error_messages · mentioned_files · mentioned_functions&lt;br&gt;stack_trace_methods (ClassName#method) · keywords · log_parse_result (Drain3)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="130" y="165" width="420" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" source="preproc" target="agentctx" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- AGENT CONTEXT -->
+        <mxCell id="agentctx" value="&lt;b&gt;AgentContext&lt;/b&gt; — shared mutable state passed across all agents&lt;br&gt;problem_statement · repo_path · language · repo_skeleton · keywords[]&lt;br&gt;candidate_files[] · candidate_methods[] · fault_hypothesis · structured_bug_info&lt;br&gt;stack_trace_files[] · test_derived_candidates[] · retriever · graph_retriever" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="130" y="275" width="420" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- background CPG arrow -->
+        <mxCell id="e_cpg_bg" value="background thread" style="edgeStyle=elbowEdgeStyle;elbow=vertical;dashed=1;fontSize=10;endArrow=open;endFill=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" edge="1" source="agentctx" target="cpg" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" source="agentctx" target="phase1" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ===== PHASE 1 CONTAINER ===== -->
+        <mxCell id="phase1" value="Phase 1: Fault Comprehension" style="swimlane;fillColor=#f0f7e6;strokeColor=#82b366;fontStyle=1;fontSize=13;startSize=32;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="110" y="400" width="460" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="prestep" value="&lt;b&gt;★ [NEW] _extract_structured_bug_info()&lt;/b&gt;&lt;br&gt;1 lightweight LLM call (no tools) — BugCerberus-style pre-extraction&lt;br&gt;→ bug_phenomenon · bug_explanation · bug_traceback" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="phase1">
+          <mxGeometry x="20" y="42" width="420" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="compagent" value="&lt;b&gt;ComprehensionAgent&lt;/b&gt;&lt;br&gt;Tools (4): code_search · read_file · list_directory · search_tests&lt;br&gt;Output → context: fault_hypothesis · candidate_files · candidate_methods · keywords" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="phase1">
+          <mxGeometry x="20" y="112" width="420" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_pre_comp" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="prestep" target="compagent" parent="phase1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="+ wait for CPG" style="edgeStyle=orthogonalEdgeStyle;rounded=0;fontSize=10;" edge="1" source="phase1" target="reflloop" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ===== REFLECTION LOOP CONTAINER ===== -->
+        <mxCell id="reflloop" value="Phase 2: Navigation + Confirmation Loop (max 3 rounds)" style="swimlane;fillColor=#fff3e0;strokeColor=#e65100;fontStyle=1;fontSize=13;startSize=32;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="110" y="638" width="460" height="305" as="geometry" />
+        </mxCell>
+
+        <mxCell id="navagent" value="&lt;b&gt;NavigationAgent&lt;/b&gt; (11 tools)&lt;br&gt;code_search · read_file · list_directory · get_file_outline · get_function_source&lt;br&gt;semantic_file_search · semantic_search · git_log&lt;br&gt;graph_search · find_callers · find_callees&lt;br&gt;Output: suspicious_locations[] (file_path, function, start_line, suspicion_score)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="reflloop">
+          <mxGeometry x="20" y="42" width="420" height="88" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_nav_conf" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="navagent" target="confagent" parent="reflloop">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="confagent" value="&lt;b&gt;ConfirmationAgent&lt;/b&gt; (5 tools)&lt;br&gt;code_search · read_file · semantic_search · find_callers · find_callees&lt;br&gt;Output: ranked_locations[] (rank, file, function, confidence, explanation) · root_cause" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="reflloop">
+          <mxGeometry x="20" y="146" width="420" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_conf_dec" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="confagent" target="confdec" parent="reflloop">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="confdec" value="top confidence&lt;br&gt;≥ 0.5?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;fontStyle=1;" vertex="1" parent="reflloop">
+          <mxGeometry x="162" y="228" width="136" height="62" as="geometry" />
+        </mxCell>
+
+        <!-- NO: loop back inside container -->
+        <mxCell id="e_no" value="NO → reflection_feedback" style="edgeStyle=orthogonalEdgeStyle;fontSize=9;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" source="confdec" target="navagent" parent="reflloop">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="432" y="259" />
+              <mxPoint x="432" y="86" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- YES: exit container to scorer -->
+        <mxCell id="e_yes" value="YES" style="edgeStyle=orthogonalEdgeStyle;fontSize=10;fontStyle=1;" edge="1" source="confdec" target="scorer" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- UNIFIED SCORER -->
+        <mxCell id="scorer" value="&lt;b&gt;UnifiedScorer&lt;/b&gt; — 8-signal weighted reranking&lt;br&gt;LLM confidence ×1.0 · Stack trace ×2.5 · Error match ×1.5 · Mentioned file ×1.2&lt;br&gt;Graph proximity ×0.8 · Semantic ×0.6 · Method count ×0.3 · Test file penalty ×0.5" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="130" y="988" width="420" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;" edge="1" source="scorer" target="locresult" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- LocalizationResult OUTPUT -->
+        <mxCell id="locresult" value="&lt;b&gt;LocalizationResult&lt;/b&gt;&lt;br&gt;ranked_files[] · ranked_methods[] · ranked_locations[]&lt;br&gt;root_cause · total_time · total_llm_calls · total_tokens" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="130" y="1098" width="420" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== RIGHT COLUMN ==================== -->
+
+        <!-- CODE PROPERTY GRAPH -->
+        <mxCell id="cpg" value="&lt;b&gt;Code Property Graph (CPG)&lt;/b&gt;&lt;br&gt;[Built in background thread · Cached per repo]&lt;br&gt;&lt;br&gt;Nodes: File · Class · Function / Method&lt;br&gt;Edges: CALLS · IMPORTS · INHERITS · CONTAINS&lt;br&gt;&lt;br&gt;Exposed as agent tools:&lt;br&gt;• graph_search (BFS keyword expansion)&lt;br&gt;• find_callers · find_callees" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="650" y="390" width="270" height="195" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_cpg_nav" value="graph_search&lt;br&gt;find_callers · find_callees" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=9;endArrow=open;endFill=0;" edge="1" source="cpg" target="navagent" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- RAG LAYER -->
+        <mxCell id="rag" value="&lt;b&gt;RAG Layer&lt;/b&gt; ⚠️ requires prior indexing&lt;br&gt;&lt;br&gt;ChromaDB / Qdrant vector store&lt;br&gt;→ semantic_search (embedding similarity)&lt;br&gt;&lt;br&gt;BM25FileIndex (camelCase-aware tokenizer)&lt;br&gt;→ keyword matching on code identifiers&lt;br&gt;&lt;br&gt;hybrid_get_similar_files():&lt;br&gt;→ RRF fusion (50% semantic + 50% BM25)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="650" y="625" width="270" height="195" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_rag_nav" value="semantic_search&lt;br&gt;semantic_file_search" style="edgeStyle=orthogonalEdgeStyle;dashed=1;fontSize=9;endArrow=open;endFill=0;" edge="1" source="rag" target="navagent" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- CONFIG FLAGS -->
+        <mxCell id="cfgflags" value="&lt;b&gt;Config Flags (.env)&lt;/b&gt;&lt;br&gt;&lt;br&gt;ENABLE_GRAPH_RAG = true&lt;br&gt;ENABLE_REPO_SKELETON = true&lt;br&gt;ENABLE_UNIFIED_SCORING = true&lt;br&gt;&lt;b&gt;ENABLE_STRUCTURED_BUG_EXTRACTION = true ★&lt;/b&gt;&lt;br&gt;REFLECTION_MAX_ROUNDS = 2&lt;br&gt;REFLECTION_CONF_THRESHOLD = 0.5&lt;br&gt;MAX_AGENT_ITERATIONS = 10&lt;br&gt;LLM_PROVIDER = gemini&lt;br&gt;LLM_MODEL = gemini-2.0-flash" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="650" y="860" width="270" height="175" as="geometry" />
+        </mxCell>
+
+        <!-- MULTI-PASS -->
+        <mxCell id="multipass" value="&lt;b&gt;Multi-pass (optional --multi-pass N)&lt;/b&gt;&lt;br&gt;localize() × N runs · each with different temperature&lt;br&gt;→ Merge all results via RRF&lt;br&gt;→ 1 final LocalizationResult" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="650" y="1075" width="270" height="80" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== LEGEND ==================== -->
+        <mxCell id="legend" value="Legend" style="swimlane;fillColor=#ffffff;strokeColor=#333333;fontSize=12;fontStyle=1;startSize=28;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="390" width="205" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg1" value="Input / Output" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="12" y="38" width="140" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg2" value="LLM Agent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="12" y="72" width="140" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg3" value="★ New feature (BugCerberus)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="12" y="106" width="140" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg4" value="Supporting layer (CPG, Config)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="12" y="140" width="140" height="26" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg5" value="⚠️ Optional (needs indexing)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="legend">
+          <mxGeometry x="12" y="164" width="140" height="26" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

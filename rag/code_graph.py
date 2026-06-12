@@ -10,6 +10,7 @@ that implements the abstract GraphBackend interface.
 """
 
 import ast
+import os
 import re
 import logging
 from pathlib import Path
@@ -212,17 +213,16 @@ class PythonGraphBuilder:
             "build", "dist", ".venv", "venv", ".eggs",
         }
 
-        py_files = []
-        for root, dirs, files in repo.rglob("*").__class__.__mro__[0].__name__ and []:  # dummy
-            pass
-
-        # Collect Python files
-        for path in sorted(repo.rglob("*")):
-            if path.is_file() and path.suffix in extensions:
-                # Skip unwanted directories
-                if any(skip in path.parts for skip in skip_dirs):
-                    continue
-                py_files.append(path)
+        py_files: list[Path] = []
+        # Collect files with os.walk (faster than repo.rglob("*") on large repos)
+        for root, dirs, files in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and "test" not in d.lower()]
+            root_path = Path(root)
+            for filename in files:
+                path = root_path / filename
+                if path.suffix in extensions:
+                    py_files.append(path)
+        py_files.sort()
 
         logger.info(f"Building Python graph from {len(py_files)} files")
 
@@ -533,12 +533,15 @@ class JavaGraphBuilder:
             "test", "tests", ".idea",
         }
 
-        java_files = []
-        for path in sorted(repo.rglob("*")):
-            if path.is_file() and path.suffix in extensions:
-                if any(skip in path.parts for skip in skip_dirs):
-                    continue
-                java_files.append(path)
+        java_files: list[Path] = []
+        for root, dirs, files in os.walk(repo):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and "test" not in d.lower()]
+            root_path = Path(root)
+            for filename in files:
+                path = root_path / filename
+                if path.suffix in extensions:
+                    java_files.append(path)
+        java_files.sort()
 
         logger.info(f"Building Java graph from {len(java_files)} files")
 
@@ -643,10 +646,10 @@ class JavaGraphBuilder:
             containing_class = class_positions[idx - 1][1] if idx > 0 else ""
             
             if containing_class:
-                method_id = f"method::{file_path}::{containing_class}.{method_name}"
+                method_id = f"method::{file_path}::{containing_class}.{method_name}@{line_no}"
                 parent_id = f"class::{file_path}::{containing_class}"
             else:
-                method_id = f"function::{file_path}::{method_name}"
+                method_id = f"function::{file_path}::{method_name}@{line_no}"
                 parent_id = file_id
 
             graph.add_node(GraphNode(
@@ -681,13 +684,52 @@ class JavaGraphBuilder:
                     ))
 
     def _extract_method_body(self, source: str, start_pos: int) -> str:
-        """Extract method body by counting braces."""
+        """
+        Extract method body by counting braces, skipping string/char literals
+        and line/block comments so that braces inside them are not counted.
+        """
         depth = 1
         i = start_pos
-        while i < len(source) and depth > 0:
-            if source[i] == "{":
+        n = len(source)
+        while i < n and depth > 0:
+            ch = source[i]
+            if ch == '"':
+                # Skip string literal — handles escaped quotes (\")
+                i += 1
+                while i < n:
+                    if source[i] == '\\':
+                        i += 2
+                        continue
+                    if source[i] == '"':
+                        break
+                    i += 1
+            elif ch == "'":
+                # Skip char literal — handles escaped chars (\')
+                i += 1
+                while i < n:
+                    if source[i] == '\\':
+                        i += 2
+                        continue
+                    if source[i] == "'":
+                        break
+                    i += 1
+            elif ch == '/' and i + 1 < n:
+                if source[i + 1] == '/':
+                    # Line comment: skip to end of line
+                    while i < n and source[i] != '\n':
+                        i += 1
+                    continue
+                elif source[i + 1] == '*':
+                    # Block comment: skip to */
+                    i += 2
+                    while i + 1 < n:
+                        if source[i] == '*' and source[i + 1] == '/':
+                            i += 1
+                            break
+                        i += 1
+            elif ch == '{':
                 depth += 1
-            elif source[i] == "}":
+            elif ch == '}':
                 depth -= 1
             i += 1
         return source[start_pos:i] if depth == 0 else ""
@@ -695,9 +737,31 @@ class JavaGraphBuilder:
 
 # ──────────────────────────── Factory ────────────────────────────
 
+def _detect_language(repo_path: str) -> str:
+    """Auto-detect dominant language in a repository."""
+    repo = Path(repo_path)
+    py_count = 0
+    java_count = 0
+    skip_dirs = {
+        ".git", "__pycache__", "node_modules", ".tox", ".eggs",
+        "build", "dist", ".venv", "venv", ".mypy_cache", ".pytest_cache",
+        "target", ".gradle", ".idea",
+    }
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for filename in files:
+            if filename.endswith(".py"):
+                py_count += 1
+            elif filename.endswith(".java"):
+                java_count += 1
+    language = "java" if java_count > py_count else "python"
+    logger.info(f"Auto-detected language: {language} (py={py_count}, java={java_count})")
+    return language
+
+
 def build_code_graph(repo_path: str, language: str = "auto") -> CodePropertyGraph:
     """
-    Build a Code Property Graph for a repository.
+    Build a Code Property Graph for a repository (in-memory).
 
     Args:
         repo_path: Path to the repository
@@ -706,14 +770,8 @@ def build_code_graph(repo_path: str, language: str = "auto") -> CodePropertyGrap
     Returns:
         CodePropertyGraph instance
     """
-    repo = Path(repo_path)
-
     if language == "auto":
-        # Count file types to determine language
-        py_count = len(list(repo.rglob("*.py")))
-        java_count = len(list(repo.rglob("*.java")))
-        language = "java" if java_count > py_count else "python"
-        logger.info(f"Auto-detected language: {language} (py={py_count}, java={java_count})")
+        language = _detect_language(repo_path)
 
     if language == "java":
         builder = JavaGraphBuilder()
@@ -721,3 +779,57 @@ def build_code_graph(repo_path: str, language: str = "auto") -> CodePropertyGrap
     else:
         builder = PythonGraphBuilder()
         return builder.build(repo_path, extensions={".py"})
+
+
+def get_or_build_graph(
+    repo_path: str,
+    language: str = "auto",
+    use_neo4j: bool = False,
+    neo4j_uri: str = "bolt://localhost:7687",
+    neo4j_user: str = "neo4j",
+    neo4j_password: str = "password",
+    neo4j_database: str = "neo4j",
+):
+    """
+    Get a graph backend — either in-memory or Neo4j.
+
+    When Neo4j is enabled, checks if a graph already exists in the database.
+    If it does (and has nodes), returns the existing Neo4j graph directly
+    without rebuilding. Otherwise builds from source and imports.
+
+    Args:
+        repo_path: Path to the repository
+        language: "python", "java", or "auto"
+        use_neo4j: Whether to use Neo4j backend
+        neo4j_uri: Neo4j Bolt URI
+        neo4j_user: Neo4j username
+        neo4j_password: Neo4j password
+        neo4j_database: Neo4j database name
+
+    Returns:
+        GraphBackend instance (CodePropertyGraph or Neo4jGraph)
+    """
+    if not use_neo4j:
+        return build_code_graph(repo_path, language=language)
+
+    from rag.neo4j_backend import Neo4jGraph
+
+    neo4j_graph = Neo4jGraph(
+        uri=neo4j_uri, user=neo4j_user,
+        password=neo4j_password, database=neo4j_database,
+    )
+
+    # Check if Neo4j already has data
+    stats = neo4j_graph.stats()
+    if stats["total_nodes"] > 0:
+        logger.info(
+            f"Using existing Neo4j graph: {stats['total_nodes']} nodes, "
+            f"{stats['total_edges']} edges"
+        )
+        return neo4j_graph
+
+    # Build from source and import
+    logger.info("Neo4j graph empty — building from source and importing...")
+    in_memory = build_code_graph(repo_path, language=language)
+    neo4j_graph.import_from_in_memory(in_memory)
+    return neo4j_graph

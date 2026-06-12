@@ -7,13 +7,7 @@ with natural language explanations.
 import logging
 
 from agents.base_agent import BaseAgent, AgentContext, AgentResult
-from tools.code_search import code_search
-from tools.semantic_search import semantic_search_formatted
-from tools.file_reader import read_file
-from tools.graph_search import (
-    agent_find_callers, agent_find_callees,
-    AGENT_FIND_CALLERS_TOOL, AGENT_FIND_CALLEES_TOOL,
-)
+from tools.registry import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +26,21 @@ You have access to:
 For each candidate location:
 1. Read the full source code of the suspicious function/method
 2. Analyze the logic carefully against the bug description
-3. Check for common bug patterns: off-by-one, wrong conditions, missing checks, etc.
+3. Check for common bug patterns: off-by-one, wrong conditions, missing checks, null handling, type mismatches
 4. Consider the data flow and control flow
 5. Assess how well the code matches the reported behavior
 6. For each top candidate, reason explicitly:
    (a) Does this code match the reported behavior?
    (b) Would changing this location plausibly fix the bug?
    (c) Is there a stronger alternative location?
+
+CRITICAL RANKING RULES for Top-1 accuracy:
+- Files mentioned in stack traces or error messages should be STRONGLY preferred for rank 1
+- Assign HIGH confidence (0.8+) ONLY when you find a clear bug that directly explains the reported behavior
+- Assign MEDIUM confidence (0.5-0.79) when the code is suspicious but the bug pattern is not obvious
+- Assign LOW confidence (<0.5) when the connection to the bug is speculative
+- If multiple files could be buggy, prefer files that are actually executed (in stack traces) over inferred files
+- DO NOT give high confidence to test files unless the bug is clearly in test setup/assertion logic
 
 If the provided candidates are weak or inconclusive, do NOT just reorder them.
 Actively discover new candidates using code_search and semantic_search, then validate them.
@@ -67,69 +69,25 @@ After thorough review, respond with your FINAL ranked results as a JSON block:
 }
 ```
 
-Be thorough and analytical. The rank 1 location should be your strongest candidate.
-Include confidence scores (0.0 to 1.0) and detailed explanations.
+Be thorough and analytical. The rank 1 location should be your strongest candidate with honest confidence.
+Include detailed explanations that justify the confidence score.
 """
 
 
 class ConfirmationAgent(BaseAgent):
     """Agent that reviews and confirms suspicious locations."""
 
+    # Tools sourced from the central registry
+    TOOLS = [
+        "code_search", "read_file",
+        "semantic_search",
+        "find_callers", "find_callees",
+    ]
+
     def __init__(self):
         super().__init__(name="FaultConfirmation")
-
-        self.register_tool("code_search", code_search, {
-            "name": "code_search",
-            "description": "Search for text/regex in code files.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "is_regex": {"type": "boolean", "default": False},
-                    "file_pattern": {"type": "string"},
-                    "max_results": {"type": "integer", "default": 20},
-                },
-                "required": ["query"],
-            }
-        })
-
-        self.register_tool("read_file", read_file, {
-            "name": "read_file",
-            "description": "Read file contents with line numbers.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
-                },
-                "required": ["file_path"],
-            }
-        })
-
-        self.register_tool("semantic_search", semantic_search_formatted, {
-            "name": "semantic_search",
-            "description": (
-                "Search code by natural language meaning. "
-                "Finds code semantically similar to the query."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Natural language query"},
-                    "top_k": {"type": "integer", "default": 10},
-                },
-                "required": ["query"],
-            }
-        })
-
-        # Graph RAG tools for impact analysis
-        self.register_tool(
-            "find_callers", agent_find_callers, AGENT_FIND_CALLERS_TOOL
-        )
-        self.register_tool(
-            "find_callees", agent_find_callees, AGENT_FIND_CALLEES_TOOL
-        )
+        for name in self.TOOLS:
+            self.register_tool(name, *TOOL_REGISTRY[name])
 
     def get_system_prompt(self, context: AgentContext) -> str:
         return SYSTEM_PROMPT
@@ -144,7 +102,21 @@ class ConfirmationAgent(BaseAgent):
             "",
         ]
 
-        # Latest navigation round (after reflection retries)
+        if context.error_messages:
+            parts.append("## Error Messages (HIGH PRIORITY - check these)\n")
+            for err in context.error_messages[:5]:
+                parts.append(f"- {err}")
+            parts.append("")
+
+        if context.stack_trace_files:
+            parts.append("## Stack Trace Files (HIGHEST PRIORITY - start here)\n")
+            parts.append(
+                "These files are directly linked to the crash. Prioritize them for rank 1.\n"
+            )
+            for i, f in enumerate(context.stack_trace_files[:10], 1):
+                parts.append(f"{i}. {f}")
+            parts.append("")
+
         nav_results = None
         for trace in reversed(context.agent_traces):
             if trace.get("action") == "navigation_results":
@@ -154,7 +126,10 @@ class ConfirmationAgent(BaseAgent):
         if context.candidate_files:
             parts.append("## Candidate Files (ordered by suspicion)")
             for i, f in enumerate(context.candidate_files, 1):
-                parts.append(f"{i}. {f}")
+                stack_marker = (
+                    " [IN STACK TRACE]" if f in context.stack_trace_files else ""
+                )
+                parts.append(f"{i}. {f}{stack_marker}")
             parts.append("")
 
         if context.candidate_methods:
@@ -170,10 +145,13 @@ class ConfirmationAgent(BaseAgent):
 
         parts.append(
             "\nPlease carefully review each candidate location by reading "
-            "the actual source code. For each strong candidate, reason step by step: "
+            "the actual source code. START with stack-trace-linked files if present - "
+            "they have the highest probability of containing the bug. "
+            "For each strong candidate, reason step by step: "
             "(1) match to reported behavior, (2) whether a fix here would address the bug, "
             "(3) whether another location is more likely. If candidates are weak, use "
-            "code_search and semantic_search to find and rank NEW file paths before final JSON."
+            "code_search and semantic_search to find and rank NEW file paths before final JSON. "
+            "Be conservative with confidence - only 0.8+ when you find a clear, obvious bug."
         )
 
         return "\n".join(parts)
@@ -187,8 +165,7 @@ class ConfirmationAgent(BaseAgent):
         # Update context with final results
         if ranked:
             context.candidate_files = [
-                loc["file_path"] for loc in ranked
-                if loc.get("file_path")
+                loc["file_path"] for loc in ranked if loc.get("file_path")
             ]
             context.candidate_methods = []
             for loc in ranked:
@@ -201,8 +178,7 @@ class ConfirmationAgent(BaseAgent):
                     context.candidate_methods.append(method)
 
         logger.info(
-            f"[ConfirmationAgent] Final ranking: "
-            f"{len(ranked)} locations confirmed"
+            f"[ConfirmationAgent] Final ranking: {len(ranked)} locations confirmed"
         )
         if ranked:
             top = ranked[0]
@@ -211,7 +187,9 @@ class ConfirmationAgent(BaseAgent):
                 f"({top.get('confidence', 0):.2f})"
             )
 
-    def get_reflection_message(self, result: AgentResult, confidence_threshold: float) -> str:
+    def get_reflection_message(
+        self, result: AgentResult, confidence_threshold: float
+    ) -> str:
         """
         Produce reflection guidance for a retry round when confidence is low.
         """

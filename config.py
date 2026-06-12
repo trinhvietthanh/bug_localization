@@ -44,8 +44,19 @@ class RAGConfig:
     """RAG pipeline configuration."""
 
     collection_name: str = "codebase"
-    persist_directory: str = str(BASE_DIR / "data" / "chromadb")
+    persist_directory: str = str(BASE_DIR / "data" / "qdrant")
     top_k: int = int(os.getenv("RAG_TOP_K", "20"))
+
+
+@dataclass
+class Neo4jConfig:
+    """Neo4j graph database configuration."""
+
+    enabled: bool = os.getenv("NEO4J_ENABLED", "false").lower() in ("true", "1", "yes")
+    uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    user: str = os.getenv("NEO4J_USER", "neo4j")
+    password: str = os.getenv("NEO4J_PASSWORD", "password")
+    database: str = os.getenv("NEO4J_DATABASE", "neo4j")
 
 
 @dataclass
@@ -58,20 +69,20 @@ class EvaluationConfig:
 
 
 @dataclass
-class RerankerConfig:
-    """Reranker configuration."""
+class ScoringConfig:
+    """Unified scoring configuration."""
 
-    enabled: bool = os.getenv("RERANKER_ENABLED", "true").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    api_key: str = os.getenv("RERANK_API_KEY", os.getenv("JINA_API_KEY", ""))
-    model_name: str = os.getenv(
-        "RERANK_MODEL", os.getenv("JINA_RERANKER_MODEL", "jina-reranker-v2-code")
-    )
-    base_url: str = os.getenv("RERANK_BASE_URL", "https://api.jina.ai/v1/rerank")
-    top_n: int = int(os.getenv("RERANKER_TOP_N", "10"))
+    weight_llm_confidence: float = float(os.getenv("SCORE_WEIGHT_LLM", "1.0"))
+    weight_stack_trace: float = float(os.getenv("SCORE_WEIGHT_STACK_TRACE", "2.5"))
+    weight_error_match: float = float(os.getenv("SCORE_WEIGHT_ERROR", "1.5"))
+    weight_mentioned_file: float = float(os.getenv("SCORE_WEIGHT_MENTIONED", "1.2"))
+    weight_graph_proximity: float = float(os.getenv("SCORE_WEIGHT_GRAPH", "0.8"))
+    weight_semantic: float = float(os.getenv("SCORE_WEIGHT_SEMANTIC", "0.6"))
+    weight_method_count: float = float(os.getenv("SCORE_WEIGHT_METHOD", "0.3"))
+    test_file_penalty: float = float(os.getenv("SCORE_TEST_PENALTY", "0.5"))
+    enable_unified_scoring: bool = os.getenv(
+        "ENABLE_UNIFIED_SCORING", "true"
+    ).lower() in ("true", "1", "yes")
 
 
 @dataclass
@@ -81,8 +92,9 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     rag: RAGConfig = field(default_factory=RAGConfig)
+    neo4j: Neo4jConfig = field(default_factory=Neo4jConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
-    reranker: RerankerConfig = field(default_factory=RerankerConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     max_agent_iterations: int = int(os.getenv("MAX_AGENT_ITERATIONS", "10"))
     max_parallel_tools: int = int(os.getenv("MAX_PARALLEL_TOOLS", "8"))
@@ -97,17 +109,23 @@ class Config:
         "1",
         "yes",
     )
-    repo_skeleton_max_files: int = int(os.getenv("REPO_SKELETON_MAX_FILES", "180"))
-    rerank_max_chars_per_file: int = int(
-        os.getenv("RERANK_MAX_CHARS_PER_FILE", "12000")
-    )
+    repo_skeleton_max_files: int = int(os.getenv("REPO_SKELETON_MAX_FILES", "80"))
     # Self-reflection: extra Navigation+Confirmation rounds when top confidence is low (max 2 extra)
     reflection_max_rounds: int = int(os.getenv("REFLECTION_MAX_ROUNDS", "2"))
     reflection_conf_threshold: float = float(
-        os.getenv("REFLECTION_CONF_THRESHOLD", "0.3")
+        os.getenv("REFLECTION_CONF_THRESHOLD", "0.5")
     )
     # Best-of-N: sampling temperature when base LLM_TEMPERATURE is 0
     multi_pass_temperature: float = float(os.getenv("MULTI_PASS_TEMPERATURE", "0.3"))
+    # Hard timeout per bug (seconds). 0 = no limit. Prevents runaway eval jobs.
+    per_bug_timeout: int = int(os.getenv("PER_BUG_TIMEOUT", "300"))
+    # Per-LLM-call HTTP timeout (seconds). Prevents a single slow API call from
+    # blocking a worker thread indefinitely. Should be < per_bug_timeout.
+    llm_call_timeout: int = int(os.getenv("LLM_CALL_TIMEOUT", "120"))
+    # BugCerberus-style: lightweight LLM pre-extraction of bug_phenomenon/explanation/traceback
+    enable_structured_bug_extraction: bool = os.getenv(
+        "ENABLE_STRUCTURED_BUG_EXTRACTION", "true"
+    ).lower() not in ("false", "0", "no")
 
 
 # Singleton config instance

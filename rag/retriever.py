@@ -1,21 +1,28 @@
 """
 Semantic retriever for the RAG pipeline.
-Queries the ChromaDB vector store to find relevant code.
+Queries the Qdrant vector store to find relevant code.
+
+Enhanced for Ground-truth File Identification (GFI):
+- package_filter for Java package-scoped queries
+- language_filter for cross-language disambiguation
+- get_similar_files returns package_name and language metadata
+- get_file_summaries returns file_summary chunks for fast structural lookup
+- hybrid_get_similar_files: BM25 + semantic RRF fusion
 """
 
 import logging
-from functools import lru_cache
+from collections import OrderedDict
 from typing import Optional
-
-import chromadb
 
 from rag.embedder import CodeEmbedder
 
 logger = logging.getLogger(__name__)
 
+_EMBED_CACHE_MAX = 1000
+
 
 class CodeRetriever:
-    """Retrieves code chunks from ChromaDB based on semantic similarity."""
+    """Retrieves code chunks from Qdrant based on semantic similarity."""
 
     def __init__(
         self,
@@ -32,143 +39,277 @@ class CodeRetriever:
             api_base=embedding_api_base,
             api_key=embedding_api_key,
         )
-        self._embed_cache: dict[str, list[float]] = {}
+        self._embed_cache: OrderedDict[str, list[float]] = OrderedDict()
 
-        # Connect to ChromaDB
-        self.client = chromadb.PersistentClient(path=persist_directory)
+        from qdrant_client import QdrantClient
+        self.client = QdrantClient(path=persist_directory)
+
+        # Verify collection exists and has data
         try:
-            self.collection = self.client.get_collection(collection_name)
+            info = self.client.get_collection(collection_name)
+            if info.points_count == 0:
+                logger.warning(
+                    f"Collection '{collection_name}' is empty. Run indexing first."
+                )
+            else:
+                logger.debug(
+                    f"Collection '{collection_name}' ready: {info.points_count} chunks"
+                )
+            self._ready = True
         except Exception:
             logger.warning(
-                f"Collection '{collection_name}' not found. "
-                "Run indexing first."
+                f"Collection '{collection_name}' not found. Run indexing first."
             )
-            self.collection = None
+            self._ready = False
+
+    # ------------------------------------------------------------------
+    # Core query
+    # ------------------------------------------------------------------
 
     def query(
         self,
         query_text: str,
         top_k: int = 10,
+        min_score: float = 0.0,
         file_filter: Optional[str] = None,
         chunk_type_filter: Optional[str] = None,
+        repo_filter: Optional[str] = None,
+        package_filter: Optional[str] = None,
+        language_filter: Optional[str] = None,
     ) -> list[tuple[dict, float]]:
         """
-        Query the vector store for relevant code.
+        Query the vector store for relevant code chunks.
 
         Args:
-            query_text: Natural language query
-            top_k: Number of results to return
-            file_filter: Optional file path filter (substring match)
-            chunk_type_filter: Optional chunk type filter ("function", "class", "module")
+            query_text:        Natural language or code query
+            top_k:             Number of results to return
+            min_score:         Minimum similarity score threshold (default 0.0, no filter)
+            file_filter:       Substring match on file_path
+            chunk_type_filter: Exact match on chunk_type
+            repo_filter:       Exact match on repo_id (use project name, e.g. "Lang")
+            package_filter:    Substring / text match on package_name (Java)
+            language_filter:   Exact match on language ("java", "python", …)
 
         Returns:
             List of (document_dict, similarity_score) tuples.
-            Each document_dict has 'text' and 'metadata' keys.
+            document_dict has 'text' and 'metadata' keys.
+            Scores are cosine similarities in [−1, 1] (higher = more similar).
         """
-        if self.collection is None:
+        if not self._ready:
             logger.error("No collection available. Run indexing first.")
             return []
 
-        # Build where filters
-        where_filter = None
-        if file_filter or chunk_type_filter:
-            conditions = []
-            if file_filter:
-                conditions.append({"file_path": {"$contains": file_filter}})
-            if chunk_type_filter:
-                conditions.append({"chunk_type": chunk_type_filter})
+        qdrant_filter = self._build_filter(
+            repo_filter=repo_filter,
+            language_filter=language_filter,
+            chunk_type_filter=chunk_type_filter,
+            package_filter=package_filter,
+            file_filter=file_filter,
+        )
 
-            if len(conditions) == 1:
-                where_filter = conditions[0]
-            else:
-                where_filter = {"$and": conditions}
-
-        # Embed the query (with cache to avoid re-embedding identical queries)
         if query_text in self._embed_cache:
             query_embedding = self._embed_cache[query_text]
+            self._embed_cache.move_to_end(query_text)
         else:
             query_embedding = self.embedder.embed_text(query_text)
+            if len(self._embed_cache) >= _EMBED_CACHE_MAX:
+                self._embed_cache.popitem(last=False)
             self._embed_cache[query_text] = query_embedding
 
-        # Query ChromaDB
         try:
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=top_k,
-                where=where_filter,
-                include=["documents", "metadatas", "distances"],
+            hits = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                query_filter=qdrant_filter,
+                limit=top_k,
+                with_payload=True,
             )
         except Exception as e:
-            logger.error(f"Query failed: {e}")
+            logger.error(f"Qdrant query failed: {e}")
             return []
 
-        # Parse results
         output = []
-        if results and results["documents"] and results["documents"][0]:
-            docs = results["documents"][0]
-            metas = results["metadatas"][0]
-            distances = results["distances"][0]
-
-            for doc, meta, dist in zip(docs, metas, distances):
-                # ChromaDB returns cosine distance; convert to similarity
-                similarity = 1.0 - dist
-                output.append((
-                    {"text": doc, "metadata": meta},
-                    similarity,
-                ))
+        for hit in hits:
+            if hit.score < min_score:
+                continue
+            payload = dict(hit.payload)
+            text = payload.pop("text", "")
+            output.append(({"text": text, "metadata": payload}, hit.score))
 
         return output
 
-    def query_formatted(
-        self,
-        query_text: str,
-        top_k: int = 10,
-    ) -> str:
-        """Get formatted query results as a string."""
-        results = self.query(query_text, top_k)
-
-        if not results:
-            return "No results found."
-
-        lines = [f"=== Semantic Search Results for: '{query_text}' ===\n"]
-        for i, (doc, score) in enumerate(results, 1):
-            meta = doc["metadata"]
-            location = meta.get("file_path", "?")
-            if meta.get("class_name"):
-                location += f"::{meta['class_name']}"
-            if meta.get("function_name"):
-                location += f".{meta['function_name']}"
-
-            lines.append(
-                f"{i}. [{score:.3f}] {location} "
-                f"(L{meta.get('start_line', '?')}-{meta.get('end_line', '?')})"
-            )
-            # Show truncated code snippet
-            text = doc["text"][:150].replace("\n", " ")
-            lines.append(f"   {text}...")
-            lines.append("")
-
-        return "\n".join(lines)
+    # ------------------------------------------------------------------
+    # File-level helpers
+    # ------------------------------------------------------------------
 
     def get_similar_files(
         self,
         query_text: str,
         top_k: int = 20,
-    ) -> list[tuple[str, float]]:
+        min_score: float = 0.0,
+        repo_filter: Optional[str] = None,
+        language_filter: Optional[str] = None,
+        include_summaries_only: bool = False,
+    ) -> list[dict]:
         """
-        Get unique files ranked by their best chunk similarity.
+        Get unique files ranked by their best chunk similarity score.
 
-        Returns:
-            List of (file_path, best_similarity_score) tuples
+        Prioritises file_summary chunks and de-duplicates by file path.
         """
-        # Fetch enough chunks to cover top_k unique files, but cap the multiplier
-        results = self.query(query_text, top_k=min(top_k * 2, top_k + 30))
+        chunk_type = "file_summary" if include_summaries_only else None
+        fetch_k = min(top_k * 3, top_k + 60)
 
-        file_scores = {}
+        results = self.query(
+            query_text,
+            top_k=fetch_k,
+            min_score=min_score,
+            repo_filter=repo_filter,
+            chunk_type_filter=chunk_type,
+            language_filter=language_filter,
+        )
+
+        if not results and include_summaries_only:
+            results = self.query(
+                query_text,
+                top_k=fetch_k,
+                min_score=min_score,
+                repo_filter=repo_filter,
+                language_filter=language_filter,
+            )
+
+        file_best: dict[str, dict] = {}
         for doc, score in results:
-            fp = doc["metadata"].get("file_path", "")
-            if fp and (fp not in file_scores or score > file_scores[fp]):
-                file_scores[fp] = score
+            meta = doc["metadata"]
+            fp = meta.get("file_path", "")
+            if not fp:
+                continue
+            if fp not in file_best or score > file_best[fp]["score"]:
+                file_best[fp] = {
+                    "file_path": fp,
+                    "score": score,
+                    "package_name": meta.get("package_name", ""),
+                    "language": meta.get("language", ""),
+                    "class_name": meta.get("class_name", ""),
+                    "function_name": meta.get("function_name", ""),
+                    "chunk_type": meta.get("chunk_type", ""),
+                    "start_line": meta.get("start_line", 0),
+                    "end_line": meta.get("end_line", 0),
+                }
 
-        ranked = sorted(file_scores.items(), key=lambda x: x[1], reverse=True)
+        ranked = sorted(file_best.values(), key=lambda x: x["score"], reverse=True)
         return ranked[:top_k]
+
+    def hybrid_get_similar_files(
+        self,
+        query_text: str,
+        top_k: int = 20,
+        repo_filter: Optional[str] = None,
+        language_filter: Optional[str] = None,
+        bm25_weight: float = 0.5,
+    ) -> list[dict]:
+        """
+        Hybrid BM25 + semantic file search using Reciprocal Rank Fusion (RRF).
+
+        RRF formula:  score(d) = Σ  1 / (k + rank_i(d))   with k=60.
+        Falls back to pure semantic when BM25 index is unavailable.
+        """
+        if not self._ready:
+            return []
+
+        # Semantic ranking
+        semantic_hits = self.get_similar_files(
+            query_text,
+            top_k=top_k * 2,
+            repo_filter=repo_filter,
+            language_filter=language_filter,
+        )
+        semantic_ranked = [h["file_path"] for h in semantic_hits]
+        semantic_scores = {h["file_path"]: h for h in semantic_hits}
+
+        # BM25 ranking
+        try:
+            from rag.bm25_index import get_or_build_index
+            bm25_idx = get_or_build_index(
+                self.client,
+                self.collection_name,
+                repo_filter=repo_filter,
+                language_filter=language_filter,
+            )
+        except Exception as exc:
+            logger.debug(f"BM25 index unavailable: {exc}")
+            bm25_idx = None
+
+        if bm25_idx is None:
+            return semantic_hits[:top_k]
+
+        bm25_results = bm25_idx.search(query_text, top_k=top_k * 2)
+        bm25_ranked = [fp for fp, _ in bm25_results]
+        bm25_score_map = {fp: score for fp, score in bm25_results}
+
+        # RRF fusion
+        from utils.ranking import reciprocal_rank_fusion
+        fused_with_scores = reciprocal_rank_fusion(
+            [semantic_ranked, bm25_ranked],
+            weights=[1.0 - bm25_weight, bm25_weight],
+        )
+        fused = [fp for fp, _ in fused_with_scores]
+
+        fused_score_map = dict(fused_with_scores)
+        output = []
+        for fp in fused[:top_k]:
+            base = semantic_scores.get(fp, {
+                "file_path": fp, "score": 0.0,
+                "package_name": "", "language": language_filter or "",
+                "class_name": "", "function_name": "",
+                "chunk_type": "", "start_line": 0, "end_line": 0,
+            })
+            output.append({
+                **base,
+                "score": fused_score_map.get(fp, 0.0),
+                "bm25_score": bm25_score_map.get(fp, 0.0),
+                "semantic_score": base.get("score", 0.0),
+            })
+
+        return output
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_filter(
+        self,
+        repo_filter: Optional[str] = None,
+        language_filter: Optional[str] = None,
+        chunk_type_filter: Optional[str] = None,
+        package_filter: Optional[str] = None,
+        file_filter: Optional[str] = None,
+    ):
+        """Build a Qdrant Filter from the optional keyword filters."""
+        from qdrant_client import models
+
+        conditions = []
+        if repo_filter:
+            conditions.append(models.FieldCondition(
+                key="repo_id", match=models.MatchValue(value=repo_filter)
+            ))
+        if language_filter:
+            conditions.append(models.FieldCondition(
+                key="language", match=models.MatchValue(value=language_filter)
+            ))
+        if chunk_type_filter:
+            conditions.append(models.FieldCondition(
+                key="chunk_type", match=models.MatchValue(value=chunk_type_filter)
+            ))
+        if package_filter:
+            # Text match — requires a text index on package_name (see indexer notes)
+            conditions.append(models.FieldCondition(
+                key="package_name", match=models.MatchText(text=package_filter)
+            ))
+        if file_filter:
+            conditions.append(models.FieldCondition(
+                key="file_path", match=models.MatchText(text=file_filter)
+            ))
+
+        if not conditions:
+            return None
+        return models.Filter(must=conditions)

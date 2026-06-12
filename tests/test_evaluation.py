@@ -7,7 +7,30 @@ from evaluation.metrics import (
     average_precision,
     compute_metrics,
     _paths_match,
+    method_top_n_accuracy,
+    normalize_d4j_ground_truth_methods,
+    _methods_match,
 )
+
+
+class TestMethodMatching:
+    def test_gt_return_type_stripped_for_d4j_normalise(self):
+        raw = [
+            "Math/Math_1/src/.../Foo.java内HypergeometricDistribution#double getNumericalMean()"
+        ]
+        out = normalize_d4j_ground_truth_methods(raw)
+        assert out == ["HypergeometricDistribution#getNumericalMean"]
+
+    def test_pred_matches_gt_with_java_return_type(self):
+        pred = ["HypergeometricDistribution#getNumericalMean"]
+        gt = ["HypergeometricDistribution#double getNumericalMean"]
+        assert method_top_n_accuracy(pred, gt, n=1)
+
+    def test_methods_match_direct(self):
+        assert _methods_match(
+            "HypergeometricDistribution#getNumericalMean",
+            "HypergeometricDistribution#double getNumericalMean",
+        )
 
 
 class TestPathMatching:

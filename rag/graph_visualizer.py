@@ -9,7 +9,6 @@ Outputs:
 
 import logging
 from pathlib import Path
-from collections import defaultdict
 
 import networkx as nx
 
@@ -56,31 +55,6 @@ NODE_SHAPES = {
     "symbol":   "star",
     "import":   "star",
 }
-
-
-def to_networkx(cpg: CodePropertyGraph) -> nx.DiGraph:
-    """Convert a CodePropertyGraph to a NetworkX DiGraph."""
-    G = nx.DiGraph()
-
-    for node in cpg.nodes.values():
-        G.add_node(
-            node.id,
-            label=node.name,
-            node_type=node.node_type,
-            file_path=node.file_path,
-            start_line=node.start_line,
-            end_line=node.end_line,
-            signature=node.signature,
-        )
-
-    for edge in cpg.edges:
-        G.add_edge(
-            edge.source_id,
-            edge.target_id,
-            edge_type=edge.edge_type,
-        )
-
-    return G
 
 
 def visualize_interactive(
@@ -332,7 +306,7 @@ def visualize_static(
     except Exception:
         pos = nx.circular_layout(G)
 
-    fig, ax = plt.subplots(figsize=figsize, facecolor="#1a1a2e")
+    _, ax = plt.subplots(figsize=figsize, facecolor="#1a1a2e")
     ax.set_facecolor("#1a1a2e")
 
     # Draw edges by type

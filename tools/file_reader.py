@@ -3,34 +3,13 @@ File reader tool for agents.
 Provides file content reading, directory listing, and file metadata.
 """
 
-import os
 import logging
 from pathlib import Path
-from dataclasses import dataclass
 
 from tools.cache import read_file_cached
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class FileInfo:
-    """Metadata about a file."""
-    path: str
-    size: int
-    language: str
-    num_lines: int
-
-
-LANGUAGE_MAP = {
-    ".py": "python", ".js": "javascript", ".ts": "typescript",
-    ".java": "java", ".c": "c", ".cpp": "cpp", ".h": "c",
-    ".go": "go", ".rs": "rust", ".rb": "ruby", ".php": "php",
-    ".scala": "scala", ".kt": "kotlin", ".sh": "bash",
-    ".yml": "yaml", ".yaml": "yaml", ".json": "json",
-    ".md": "markdown", ".txt": "text", ".toml": "toml",
-    ".cfg": "ini", ".ini": "ini", ".xml": "xml", ".html": "html",
-}
 
 
 def read_file(
@@ -38,7 +17,7 @@ def read_file(
     repo_path: str,
     start_line: int = None,
     end_line: int = None,
-    max_lines: int = 200,
+    max_lines: int = 100,
 ) -> str:
     """
     Read contents of a file within the repository.
@@ -165,68 +144,3 @@ def _format_size(size: int) -> str:
         return f"{size / (1024 * 1024):.1f}MB"
 
 
-def get_file_info(file_path: str, repo_path: str) -> FileInfo:
-    """Get metadata about a file."""
-    full_path = Path(repo_path) / file_path
-    suffix = full_path.suffix
-    content = read_file_cached(str(full_path))
-    return FileInfo(
-        path=file_path,
-        size=full_path.stat().st_size,
-        language=LANGUAGE_MAP.get(suffix, "unknown"),
-        num_lines=len(content.split("\n")),
-    )
-
-
-# Tool description for LLM agents
-TOOL_DESCRIPTION = {
-    "name": "read_file",
-    "description": (
-        "Read the contents of a source code file in the repository. "
-        "Returns the file content with line numbers. "
-        "You can specify a line range to read specific portions."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "file_path": {
-                "type": "string",
-                "description": "Relative path to the file within the repository"
-            },
-            "start_line": {
-                "type": "integer",
-                "description": "Start line (1-indexed)",
-                "default": None
-            },
-            "end_line": {
-                "type": "integer",
-                "description": "End line (1-indexed, inclusive)",
-                "default": None
-            }
-        },
-        "required": ["file_path"]
-    }
-}
-
-LIST_DIR_TOOL_DESCRIPTION = {
-    "name": "list_directory",
-    "description": (
-        "List the contents of a directory in the repository with a tree structure. "
-        "Shows files and subdirectories with their sizes."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "dir_path": {
-                "type": "string",
-                "description": "Relative path to directory (use '' or '.' for repo root)"
-            },
-            "max_depth": {
-                "type": "integer",
-                "description": "Maximum directory depth to show",
-                "default": 2
-            }
-        },
-        "required": ["dir_path"]
-    }
-}

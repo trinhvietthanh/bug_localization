@@ -7,19 +7,7 @@ based on the fault hypothesis from the Comprehension Agent.
 import logging
 
 from agents.base_agent import BaseAgent, AgentContext, AgentResult
-from tools.code_search import code_search
-from tools.file_reader import read_file, list_directory
-from tools.ast_parser import get_file_outline, get_function_source
-from tools.semantic_search import semantic_search_formatted
-from tools.git_history import git_log_formatted
-from tools.graph_search import (
-    agent_graph_search,
-    agent_find_callers,
-    agent_find_callees,
-    AGENT_GRAPH_SEARCH_TOOL,
-    AGENT_FIND_CALLERS_TOOL,
-    AGENT_FIND_CALLEES_TOOL,
-)
+from tools.registry import TOOL_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -33,23 +21,27 @@ You have access to the following tools:
 3. **list_directory**: List directory contents
 4. **get_file_outline**: Get structural outline of a Python file (classes, methods, functions)
 5. **get_function_source**: Get full source code of a specific function/method
-6. **semantic_search**: Search code by meaning using natural language
-7. **git_log**: View recent commit history for files
-8. **graph_search**: Search the Code Property Graph to find structurally related code (callers, callees, siblings, inheritance)
-9. **find_callers**: Find all functions that call a given function (trace call graph backwards)
-10. **find_callees**: Find all functions called by a given function (trace execution flow forward)
+6. **semantic_file_search**: Find the most relevant SOURCE FILES for a query (file-level, fast GFI)
+7. **semantic_search**: Search code by meaning at method/class level; supports language_filter and package_filter
+8. **git_log**: View recent commit history for files
+9. **graph_search**: Search the Code Property Graph (callers, callees, siblings, inheritance)
+10. **find_callers**: Find all functions that call a given function
+11. **find_callees**: Find all functions called by a given function
 
 Your strategy should be:
-1. First search for exact class/method/file names from the bug report and stack traces.
-2. Then search for literal error messages and exception text.
-3. Then use semantic_search for behavioral descriptions if exact search is sparse.
-4. Use graph_search to find structurally related code (callers, callees, inheritance).
-5. Use find_callers/find_callees around suspicious methods to expand investigation.
-6. Narrow down by reading outlines/functions and produce ranked suspicious locations.
+1. **File identification first**: Use `semantic_file_search` to get the top-K most relevant files
+   before reading any code. This fast structural pass prevents wasted reads.
+2. Search for exact class/method/file names from the bug report and stack traces with `code_search`.
+3. Search for literal error messages and exception text.
+4. Use `semantic_search` (with `language_filter` or `package_filter` for Java) for behavioral descriptions.
+5. Use `graph_search` / `find_callers` / `find_callees` to trace call paths.
+6. Read narrowed files/methods and produce ranked suspicious locations.
 7. ALWAYS output full repo-relative paths (e.g., src/main/java/org/.../Foo.java).
 8. If you find a suspicious method, inspect both its callers and callees.
 
-IMPORTANT TIP: Bug reports frequently contain typos (e.g., `ExtendedBufferReader` instead of `ExtendedBufferedReader`). If `code_search` returns 0 results for a class or method name mentioned in the bug report, DO NOT just give up or keep trying exact matches. Immediately use `semantic_search` with the same term, or use `code_search` with partial/fuzzy Regex matching.
+IMPORTANT TIP: Bug reports frequently contain typos (e.g., `ExtendedBufferReader` instead of
+`ExtendedBufferedReader`). If `code_search` returns 0 results, immediately use `semantic_search`
+with the same term, or use regex with partial matching.
 
 After your investigation, respond with a JSON block:
 
@@ -78,173 +70,24 @@ Include at least 3-5 suspicious locations, up to 15.
 class NavigationAgent(BaseAgent):
     """Agent that navigates the codebase to find suspicious locations."""
 
+    # Tools sourced from the central registry
+    TOOLS = [
+        "code_search", "read_file", "list_directory",
+        "get_function_source",
+        "semantic_search", "semantic_file_search",
+        "git_log",
+        "graph_search", "find_callers", "find_callees",
+    ]
+
     def __init__(self):
         super().__init__(name="CodebaseNavigation")
+        for name in self.TOOLS:
+            self.register_tool(name, *TOOL_REGISTRY[name])
 
-        # Register all tools
-        self.register_tool(
-            "code_search",
-            code_search,
-            {
-                "name": "code_search",
-                "description": "Search for text/regex patterns across code files.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search term"},
-                        "is_regex": {"type": "boolean", "default": False},
-                        "file_pattern": {
-                            "type": "string",
-                            "description": "File filter glob",
-                        },
-                        "max_results": {"type": "integer", "default": 20},
-                    },
-                    "required": ["query"],
-                },
-            },
-        )
-
-        self.register_tool(
-            "read_file",
-            read_file,
-            {
-                "name": "read_file",
-                "description": "Read file contents with line numbers.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string"},
-                        "start_line": {"type": "integer"},
-                        "end_line": {"type": "integer"},
-                    },
-                    "required": ["file_path"],
-                },
-            },
-        )
-
-        self.register_tool(
-            "list_directory",
-            list_directory,
-            {
-                "name": "list_directory",
-                "description": "List directory with tree structure.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "dir_path": {"type": "string"},
-                        "max_depth": {"type": "integer", "default": 2},
-                    },
-                    "required": ["dir_path"],
-                },
-            },
-        )
-
-        # Disabled AST parser tools for Java projects to avoid syntax errors and improve speed
-        # self.register_tool(
-        #     "get_file_outline",
-        #     get_file_outline,
-        #     {
-        #         "name": "get_file_outline",
-        #         "description": (
-        #             "Get structural outline of a source file showing classes, "
-        #             "methods, functions with line numbers. Works best for Python/Java."
-        #         ),
-        #         "parameters": {
-        #             "type": "object",
-        #             "properties": {
-        #                 "file_path": {"type": "string"},
-        #             },
-        #             "required": ["file_path"],
-        #         },
-        #     }
-        # )
-
-        # self.register_tool(
-        #     "get_function_source",
-        #     get_function_source,
-        #     {
-        #         "name": "get_function_source",
-        #         "description": "Get full source code of a specific function/method.",
-        #         "parameters": {
-        #             "type": "object",
-        #             "properties": {
-        #                 "file_path": {"type": "string"},
-        #                 "function_name": {"type": "string"},
-        #                 "class_name": {"type": "string", "description": "Class name for methods"},
-        #             },
-        #             "required": ["file_path", "function_name"],
-        #         }
-        #     }
-        # )
-
-        self.register_tool(
-            "get_function_source",
-            get_function_source,
-            {
-                "name": "get_function_source",
-                "description": "Get full source code of a specific function/method.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string"},
-                        "function_name": {"type": "string"},
-                        "class_name": {
-                            "type": "string",
-                            "description": "Class name for methods",
-                        },
-                    },
-                    "required": ["file_path", "function_name"],
-                },
-            },
-        )
-
-        self.register_tool(
-            "semantic_search",
-            semantic_search_formatted,
-            {
-                "name": "semantic_search",
-                "description": (
-                    "Search code by natural language meaning. "
-                    "Finds code semantically similar to the query."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Natural language query",
-                        },
-                        "top_k": {"type": "integer", "default": 10},
-                    },
-                    "required": ["query"],
-                },
-            },
-        )
-
-        self.register_tool(
-            "git_log",
-            git_log_formatted,
-            {
-                "name": "git_log",
-                "description": "View recent git commit history for a file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "File path (optional)",
-                        },
-                        "max_entries": {"type": "integer", "default": 5},
-                    },
-                    "required": [],
-                },
-            },
-        )
-
-        # Graph RAG tools
-        self.register_tool("graph_search", agent_graph_search, AGENT_GRAPH_SEARCH_TOOL)
-        self.register_tool("find_callers", agent_find_callers, AGENT_FIND_CALLERS_TOOL)
-        self.register_tool("find_callees", agent_find_callees, AGENT_FIND_CALLEES_TOOL)
+    def _register_language_tools(self, language: str):
+        """Register language-specific tools on first use."""
+        if language.lower() == "python" and "get_file_outline" not in self.tools:
+            self.register_tool("get_file_outline", *TOOL_REGISTRY["get_file_outline"])
 
     def get_system_prompt(self, context: AgentContext) -> str:
         prompt = SYSTEM_PROMPT.replace("*.py", context.file_extension)
@@ -254,28 +97,72 @@ class NavigationAgent(BaseAgent):
         )
 
     def get_initial_message(self, context: AgentContext) -> str:
-        # Extract project information for better focus
+        self._register_language_tools(context.language)
+
         project_hint = ""
         if context.instance_id and "_" in context.instance_id:
             project = context.instance_id.split("_")[0]
-            if project in ["Lang", "Math", "Chart", "Closure", "Mockito", "Time"]:
+            try:
+                from data.defects4j_loader import D4J_PROJECTS
+
+                _d4j_project_names = set(D4J_PROJECTS.keys())
+            except ImportError:
+                _d4j_project_names = {
+                    "Lang",
+                    "Math",
+                    "Chart",
+                    "Closure",
+                    "Mockito",
+                    "Time",
+                }
+            if project in _d4j_project_names:
                 project_hint = (
                     f"\n**IMPORTANT**: Focus your search EXCLUSIVELY on the '{project}' project. "
                     f"Do NOT waste time searching in other projects. "
                     f"If you find yourself looking at files from other projects, immediately redirect your search."
                 )
 
+        repo_info = f"- Language: {context.language}\n- Default Extension: {context.file_extension}"
+        if context.source_root:
+            repo_info += f"\n- Source Root: `{context.source_root}/` (all source .java files are under this directory)"
         parts = [
-            f"## Repository Information\n- Language: {context.language}\n- Default Extension: {context.file_extension}\n",
+            f"## Repository Information\n{repo_info}\n",
             "## Fault Hypothesis from Comprehension Agent\n",
             context.fault_hypothesis or "No hypothesis available.",
             "",
         ]
 
+        if context.test_derived_candidates:
+            parts.append("## Test-Derived Candidate Files (HIGH PRIORITY)\n")
+            parts.append(
+                "Inferred from failing test class names — likely the buggy source files.\n"
+            )
+            for f in context.test_derived_candidates:
+                parts.append(f"- {f}")
+            parts.append("")
+
+        if context.stack_trace_files:
+            parts.append("## Stack Trace Files (START HERE - Highest Priority)\n")
+            parts.append(
+                "These files are directly from the stack trace. Investigate them FIRST.\n"
+            )
+            for i, f in enumerate(context.stack_trace_files[:10], 1):
+                parts.append(f"{i}. {f}")
+            parts.append("")
+
+        if context.error_messages:
+            parts.append("## Error Messages (Search for these)\n")
+            for err in context.error_messages[:5]:
+                parts.append(f"- {err}")
+            parts.append("")
+
         if context.candidate_files:
             parts.append("## Initial Candidate Files")
             for f in context.candidate_files:
-                parts.append(f"- {f}")
+                stack_marker = (
+                    " [STACK TRACE]" if f in context.stack_trace_files else ""
+                )
+                parts.append(f"- {f}{stack_marker}")
             parts.append("")
 
         if context.candidate_methods:
@@ -299,10 +186,18 @@ class NavigationAgent(BaseAgent):
             parts.append(project_hint)
             parts.append("")
 
+        priority_instruction = ""
+        if context.stack_trace_files:
+            priority_instruction = (
+                "CRITICAL: Start by investigating stack trace files - they have the highest probability "
+                "of containing the bug. Read them carefully before exploring other candidates. "
+            )
+
         parts.append(
-            "\nPlease navigate the codebase to find the exact buggy locations. "
-            "Use multiple search strategies and gradually narrow down. "
-            "Provide your ranked list of suspicious locations as a JSON block."
+            f"\nPlease navigate the codebase to find the exact buggy locations. "
+            f"{priority_instruction}"
+            f"Use multiple search strategies and gradually narrow down. "
+            f"Provide your ranked list of suspicious locations as a JSON block."
         )
 
         return "\n".join(parts)

@@ -5,7 +5,6 @@ Runs the pipeline on a dataset and computes metrics.
 
 import json
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -15,8 +14,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.table import Table
 
 from config import config
-from data.loader import SWEBenchLoader, BugInstance
-from agents.orchestrator import Orchestrator, LocalizationResult
+from data.loader import SWEBenchLoader
+from agents.orchestrator import Orchestrator
 from evaluation.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)

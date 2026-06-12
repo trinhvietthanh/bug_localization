@@ -42,7 +42,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeEl
 from rich.logging import RichHandler
 
 from config import config
-from data.bugsinpy_loader import BugsInPyLoader, to_bug_instance, BUGSINPY_PROJECTS
+from data.bugsinpy_loader import BugsInPyLoader, to_bug_instance
 from agents.orchestrator import Orchestrator
 from evaluation.metrics import (
     compute_metrics, top_n_accuracy, reciprocal_rank, average_precision

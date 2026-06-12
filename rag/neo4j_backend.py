@@ -93,7 +93,10 @@ class Neo4jGraph(GraphBackend):
             logger.info("Neo4j connection closed")
 
     def __del__(self):
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # ─── Setup ───
 

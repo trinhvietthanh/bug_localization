@@ -4,23 +4,63 @@ Provides graph-based code exploration as a tool the agent can invoke.
 """
 
 import logging
-from rag.code_graph import CodePropertyGraph, build_code_graph
+import threading
+from rag.code_graph import build_code_graph, get_or_build_graph
 from rag.graph_retriever import GraphRetriever
+from config import config
 
 logger = logging.getLogger(__name__)
 
 # Singleton graph cache (avoid rebuilding per query)
 _graph_cache: dict[str, GraphRetriever] = {}
+_graph_cache_lock = threading.Lock()
 
 
-def get_graph_retriever(repo_path: str, language: str = "auto") -> GraphRetriever:
+def get_graph_retriever(
+    repo_path: str,
+    language: str = "auto",
+    use_neo4j: bool | None = None,
+) -> GraphRetriever:
     """Get or create a GraphRetriever for a repository."""
-    if repo_path not in _graph_cache:
-        logger.info(f"Building code graph for: {repo_path}")
+    cache_key = f"{repo_path}|{'neo4j' if (use_neo4j or (use_neo4j is None and config.neo4j.enabled)) else 'mem'}"
+
+    # Fast path: check without lock first
+    with _graph_cache_lock:
+        if cache_key in _graph_cache:
+            return _graph_cache[cache_key]
+
+    # Slow path: build outside lock (expensive operation)
+    logger.info(f"Building code graph for: {repo_path}")
+    neo4j_enabled = use_neo4j if use_neo4j is not None else config.neo4j.enabled
+
+    retriever = None
+    if neo4j_enabled:
+        try:
+            neo4j_cfg = config.neo4j
+            graph = get_or_build_graph(
+                repo_path=repo_path,
+                language=language,
+                use_neo4j=True,
+                neo4j_uri=neo4j_cfg.uri,
+                neo4j_user=neo4j_cfg.user,
+                neo4j_password=neo4j_cfg.password,
+                neo4j_database=neo4j_cfg.database,
+            )
+            retriever = GraphRetriever(graph=graph, repo_path=repo_path)
+            retriever._prepare_indexes()
+            logger.info("GraphRetriever using Neo4j backend")
+        except ConnectionError as e:
+            logger.warning(f"Neo4j unavailable, falling back to in-memory: {e}")
+
+    if retriever is None:
         retriever = GraphRetriever(repo_path=repo_path)
         retriever.build_graph(language=language)
-        _graph_cache[repo_path] = retriever
-    return _graph_cache[repo_path]
+
+    # Write back under lock (double-check: another thread may have beaten us)
+    with _graph_cache_lock:
+        if cache_key not in _graph_cache:
+            _graph_cache[cache_key] = retriever
+        return _graph_cache[cache_key]
 
 
 def graph_search(

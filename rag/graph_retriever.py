@@ -10,12 +10,19 @@ Workflow:
 """
 
 import logging
+import re
+from collections import OrderedDict
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from rag.code_graph import CodePropertyGraph, GraphNode, build_code_graph
+from rag.graph_backend import GraphBackend, GraphNode
+from rag.code_graph import CodePropertyGraph, build_code_graph
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_CACHE_MAX = 10_000
+_SNIPPET_CACHE_MAX = 512
+_ANCHOR_CACHE_MAX = 200
 
 
 @dataclass
@@ -52,19 +59,25 @@ class GraphRetriever:
 
     def __init__(
         self,
-        graph: CodePropertyGraph = None,
+        graph: GraphBackend = None,
         repo_path: str = "",
         vector_retriever=None,
     ):
         """
         Args:
-            graph: Pre-built CodePropertyGraph (or None to build on demand)
+            graph: Pre-built graph backend (CodePropertyGraph or Neo4jGraph)
             repo_path: Path to the source repository
             vector_retriever: Optional CodeRetriever for vector search anchor
         """
         self.graph = graph
         self.repo_path = repo_path
         self.vector_retriever = vector_retriever
+        self._token_cache: OrderedDict[str, set[str]] = OrderedDict()
+        self._snippet_file_cache: OrderedDict[str, list[str]] = OrderedDict()
+        self._query_anchor_cache: OrderedDict[str, list[tuple[GraphNode, float]]] = OrderedDict()
+        self._name_token_index: dict[str, set[str]] = {}
+        if self.graph is not None:
+            self._prepare_indexes()
 
     def build_graph(self, repo_path: str = None, language: str = "auto"):
         """Build the code graph from a repository."""
@@ -74,6 +87,7 @@ class GraphRetriever:
 
         self.repo_path = path
         self.graph = build_code_graph(path, language=language)
+        self._prepare_indexes()
         logger.info(f"Graph built: {self.graph.stats()}")
         return self.graph
 
@@ -186,6 +200,11 @@ class GraphRetriever:
         Find anchor nodes for a query.
         Uses keyword matching against graph node names.
         """
+        cache_key = query.strip().lower()
+        if cache_key in self._query_anchor_cache:
+            self._query_anchor_cache.move_to_end(cache_key)
+            return self._query_anchor_cache[cache_key]
+
         anchors = []
         query_terms = set(query.lower().split())
 
@@ -198,9 +217,21 @@ class GraphRetriever:
         }
         query_terms -= stop_words
 
-        for node in self.graph.nodes.values():
+        candidate_node_ids: set[str] = set()
+        for term in query_terms:
+            candidate_node_ids.update(self._name_token_index.get(term, set()))
+        if not candidate_node_ids:
+            # Fallback when no lexical candidates: scan full graph
+            candidate_nodes = self.graph.all_nodes()
+        else:
+            candidate_nodes = [
+                n for n in (self.graph.get_node(nid) for nid in candidate_node_ids)
+                if n is not None
+            ]
+
+        for node in candidate_nodes:
             if node.node_type in ("module", "symbol", "import"):
-                continue  # Skip abstract nodes
+                continue
 
             # Calculate relevance score based on name matching
             score = self._compute_name_score(node, query_terms)
@@ -210,7 +241,12 @@ class GraphRetriever:
 
         # Sort by score descending, take top anchors
         anchors.sort(key=lambda x: x[1], reverse=True)
-        return anchors[:5]
+        top_anchors = anchors[:5]
+        # Keep cache bounded
+        if len(self._query_anchor_cache) >= _ANCHOR_CACHE_MAX:
+            self._query_anchor_cache.popitem(last=False)
+        self._query_anchor_cache[cache_key] = top_anchors
+        return top_anchors
 
     def _compute_name_score(
         self, node: GraphNode, query_terms: set[str]
@@ -252,12 +288,19 @@ class GraphRetriever:
 
     def _tokenize(self, text: str) -> set[str]:
         """Tokenize text by splitting camelCase, snake_case, and spaces."""
-        import re
-        # Split camelCase
+        if not text:
+            return set()
+        cached = self._token_cache.get(text)
+        if cached is not None:
+            self._token_cache.move_to_end(text)
+            return cached
         tokens = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
-        # Split on non-alphanumeric
         tokens = re.split(r"[^a-zA-Z0-9]+", tokens)
-        return {t.lower() for t in tokens if len(t) > 1}
+        result = {t.lower() for t in tokens if len(t) > 1}
+        if len(self._token_cache) >= _TOKEN_CACHE_MAX:
+            self._token_cache.popitem(last=False)
+        self._token_cache[text] = result
+        return result
 
     def _expand_from_anchor(
         self,
@@ -344,7 +387,15 @@ class GraphRetriever:
             return ""
 
         try:
-            lines = filepath.read_text(encoding="utf-8", errors="ignore").split("\n")
+            key = str(filepath)
+            lines = self._snippet_file_cache.get(key)
+            if lines is None:
+                lines = filepath.read_text(encoding="utf-8", errors="ignore").split("\n")
+                if len(self._snippet_file_cache) >= _SNIPPET_CACHE_MAX:
+                    self._snippet_file_cache.popitem(last=False)
+                self._snippet_file_cache[key] = lines
+            else:
+                self._snippet_file_cache.move_to_end(key)
             start = max(0, node.start_line - 1)
             end = min(len(lines), node.start_line - 1 + max_lines)
             if node.end_line:
@@ -352,3 +403,19 @@ class GraphRetriever:
             return "\n".join(lines[start:end])
         except Exception:
             return ""
+
+    def _prepare_indexes(self):
+        """Prepare lexical index for faster anchor candidate lookup."""
+        self._name_token_index.clear()
+        if self.graph is None:
+            return
+        for node in self.graph.all_nodes():
+            if node.node_type in ("module", "symbol", "import"):
+                continue
+            tokens = (
+                self._tokenize(node.name)
+                | self._tokenize(node.signature or "")
+                | self._tokenize((node.docstring or "")[:200])
+            )
+            for token in tokens:
+                self._name_token_index.setdefault(token, set()).add(node.id)

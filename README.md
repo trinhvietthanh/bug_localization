@@ -116,6 +116,30 @@ python scripts/checkout_bugsinpy.py --project black --all
 
 **Supported Projects (493 total bugs):** ansible (18), black (23), cookiecutter (4), fastapi (16), httpie (5), keras (45), luigi (33), matplotlib (30), pandas (169), PySnooper (3), sanic (5), scrapy (40), spacy (10), thefuck (32), tornado (16), tqdm (9), youtube-dl (43)
 
+### 7. Web UI
+
+A React + FastAPI web interface for testing the bug localization system.
+
+**Start the backend:**
+```bash
+pip install -r requirements.txt
+uvicorn api.main:app --reload --port 8000
+```
+
+**Start the frontend (in a new terminal):**
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:3000 to access the UI.
+
+**Features:**
+- **Localize**: Input bug reports and repo paths, view ranked results
+- **Evaluate**: Run benchmark evaluations with metrics charts
+- **Graph**: Explore Code Property Graph visualization
+
 ## Evaluation Metrics
 - **Top-N Accuracy**: % bugs localized in top N results (N=1,3,5,10)
 - **MRR (Mean Reciprocal Rank)**: Average of 1/rank
@@ -149,6 +173,8 @@ thesis/
 │   ├── defects4j_loader.py  # Defects4J benchmark loader
 │   └── preprocessor.py  # Bug report preprocessing
 ├── evaluation/          # Metrics and benchmark runner
+├── api/                 # FastAPI backend for web UI
+├── frontend/            # React frontend for web UI
 └── tests/               # Unit & integration tests
 ```
 
