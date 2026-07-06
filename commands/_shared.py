@@ -1,7 +1,7 @@
 """
 _shared.py — shared helpers for batch benchmark evaluation commands.
 
-Both cmd_defects4j and cmd_bugsinpy use this to avoid code duplication.
+cmd_defects4j (and other batch commands) use this to avoid code duplication.
 """
 
 import json

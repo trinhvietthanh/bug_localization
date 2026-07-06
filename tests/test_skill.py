@@ -90,7 +90,6 @@ class TestBugLocalizationSkillInit:
         assert isinstance(benchmarks, dict)
         assert "defects4j" in benchmarks
         assert "swe-bench" in benchmarks
-        assert "bugsinpy" in benchmarks
 
     def test_benchmark_metadata_has_required_fields(self):
         """Each benchmark entry has required metadata fields."""

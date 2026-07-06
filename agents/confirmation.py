@@ -162,11 +162,15 @@ class ConfirmationAgent(BaseAgent):
 
         ranked = output.get("ranked_locations", [])
 
-        # Update context with final results
+        # Update context with final results. Confirmed files go first, but keep
+        # Navigation's broader candidate list behind them — dropping it capped
+        # the final ranked list at 1-3 files and starved Top-5 recall.
         if ranked:
-            context.candidate_files = [
+            confirmed = [
                 loc["file_path"] for loc in ranked if loc.get("file_path")
             ]
+            prior = [f for f in context.candidate_files if f not in confirmed]
+            context.candidate_files = confirmed + prior
             context.candidate_methods = []
             for loc in ranked:
                 if loc.get("function_name"):

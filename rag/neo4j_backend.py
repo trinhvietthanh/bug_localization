@@ -49,6 +49,7 @@ class Neo4jGraph(GraphBackend):
         user: str = "neo4j",
         password: str = "password",
         database: str = "neo4j",
+        repo_id: str = "",
     ):
         """
         Connect to a Neo4j instance.
@@ -58,10 +59,16 @@ class Neo4jGraph(GraphBackend):
             user: Neo4j username
             password: Neo4j password
             database: Database name
+            repo_id: Stable identifier for this repo's graph partition
+                     (e.g. "astropy__astropy|python|abc123").
+                     When non-empty, all read/write operations are scoped to
+                     nodes that carry this repo_id, so multiple repos can
+                     coexist in one Neo4j database without interference.
         """
         self.uri = uri
         self.user = user
         self.database = database
+        self.repo_id = repo_id  # partition key
         self._driver = None
 
         try:
@@ -106,6 +113,8 @@ class Neo4jGraph(GraphBackend):
             "CREATE INDEX node_id IF NOT EXISTS FOR (n:CodeNode) ON (n.node_id)",
             "CREATE INDEX node_name IF NOT EXISTS FOR (n:CodeNode) ON (n.name)",
             "CREATE INDEX node_type IF NOT EXISTS FOR (n:CodeNode) ON (n.node_type)",
+            # Index for repo_id to make partition lookups fast
+            "CREATE INDEX node_repo_id IF NOT EXISTS FOR (n:CodeNode) ON (n.repo_id)",
         ]
         with self._driver.session(database=self.database) as session:
             for q in queries:
@@ -126,9 +135,9 @@ class Neo4jGraph(GraphBackend):
             n.start_line = $start_line,
             n.end_line = $end_line,
             n.signature = $signature,
-            n.docstring = $docstring
+            n.docstring = $docstring,
+            n.repo_id = $repo_id
         """
-        # Also add a label based on node_type for easier Cypher queries
         label_query = f"""
         MATCH (n:CodeNode {{node_id: $node_id}})
         SET n:{self._safe_label(node.node_type)}
@@ -144,6 +153,7 @@ class Neo4jGraph(GraphBackend):
                 "end_line": node.end_line,
                 "signature": node.signature,
                 "docstring": node.docstring[:500] if node.docstring else "",
+                "repo_id": self.repo_id,
             })
             try:
                 session.run(label_query, {"node_id": node.id})
@@ -175,7 +185,8 @@ class Neo4jGraph(GraphBackend):
             n.start_line = node.start_line,
             n.end_line = node.end_line,
             n.signature = node.signature,
-            n.docstring = node.docstring
+            n.docstring = node.docstring,
+            n.repo_id = node.repo_id
         """
         batch = [
             {
@@ -187,6 +198,7 @@ class Neo4jGraph(GraphBackend):
                 "end_line": n.end_line,
                 "signature": n.signature,
                 "docstring": (n.docstring[:500] if n.docstring else ""),
+                "repo_id": self.repo_id,
             }
             for n in nodes
         ]
@@ -216,10 +228,21 @@ class Neo4jGraph(GraphBackend):
                 logger.debug(f"Batch inserted {len(edge_batch)} {edge_type} edges")
 
     def clear(self) -> None:
-        """Remove all nodes and edges from the database."""
+        """Remove nodes (and their edges) belonging to this repo from the database.
+
+        When repo_id is set, only the partition for that repo is deleted.
+        Without repo_id the entire database is cleared (backward-compatible).
+        """
         with self._driver.session(database=self.database) as session:
-            session.run("MATCH (n:CodeNode) DETACH DELETE n")
-        logger.info("Neo4j graph cleared")
+            if self.repo_id:
+                session.run(
+                    "MATCH (n:CodeNode {repo_id: $repo_id}) DETACH DELETE n",
+                    {"repo_id": self.repo_id},
+                )
+                logger.info(f"Neo4j partition '{self.repo_id}' cleared")
+            else:
+                session.run("MATCH (n:CodeNode) DETACH DELETE n")
+                logger.info("Neo4j graph cleared (all repos)")
 
     # ─── Read Operations ───
 
@@ -332,24 +355,37 @@ class Neo4jGraph(GraphBackend):
     # ─── Statistics ───
 
     def stats(self) -> dict:
-        """Return graph statistics."""
+        """Return graph statistics (scoped to this repo_id if set)."""
+        repo_filter = "WHERE n.repo_id = $repo_id" if self.repo_id else ""
+        params = {"repo_id": self.repo_id} if self.repo_id else {}
+
         with self._driver.session(database=self.database) as session:
-            # Node counts by type
-            node_result = session.run("""
+            node_result = session.run(
+                f"""
                 MATCH (n:CodeNode)
+                {repo_filter}
                 RETURN n.node_type AS type, count(*) AS count
-            """)
+                """,
+                params,
+            )
             node_types = {}
             total_nodes = 0
             for record in node_result:
                 node_types[record["type"]] = record["count"]
                 total_nodes += record["count"]
 
-            # Edge counts by type
-            edge_result = session.run("""
-                MATCH ()-[r]->()
-                RETURN type(r) AS type, count(*) AS count
-            """)
+            if self.repo_id:
+                edge_result = session.run(
+                    """
+                    MATCH (a:CodeNode {repo_id: $repo_id})-[r]->(b:CodeNode {repo_id: $repo_id})
+                    RETURN type(r) AS type, count(*) AS count
+                    """,
+                    params,
+                )
+            else:
+                edge_result = session.run(
+                    "MATCH ()-[r]->() RETURN type(r) AS type, count(*) AS count"
+                )
             edge_types = {}
             total_edges = 0
             for record in edge_result:
@@ -362,12 +398,16 @@ class Neo4jGraph(GraphBackend):
             "node_types": node_types,
             "edge_types": edge_types,
             "backend": "neo4j",
+            "repo_id": self.repo_id,
         }
 
     # ─── Iteration ───
 
     def all_nodes(self) -> list[GraphNode]:
-        """Return all nodes in the graph."""
+        """Return all nodes in this repo's partition."""
+        if self.repo_id:
+            query = "MATCH (n:CodeNode {repo_id: $repo_id}) RETURN n"
+            return self._query_nodes(query, {"repo_id": self.repo_id})
         query = "MATCH (n:CodeNode) RETURN n"
         return self._query_nodes(query)
 
@@ -422,19 +462,15 @@ class Neo4jGraph(GraphBackend):
         """
         Import all nodes and edges from an in-memory CodePropertyGraph.
 
-        This enables the workflow:
-        1. Build graph fast in-memory
-        2. Export to Neo4j for persistence and visualization
-
-        Args:
-            in_memory_graph: A CodePropertyGraph (in-memory backend)
+        Clears only the current repo's partition before importing,
+        so other repos in the same database are not affected.
         """
-        logger.info("Importing graph to Neo4j...")
+        logger.info(f"Importing graph to Neo4j (repo_id='{self.repo_id}')...")
 
-        # Clear existing data
+        # Clear only this repo's partition
         self.clear()
 
-        # Batch insert nodes
+        # Batch insert nodes (repo_id is tagged automatically by add_nodes_batch)
         all_nodes = in_memory_graph.all_nodes()
         batch_size = 500
         for i in range(0, len(all_nodes), batch_size):

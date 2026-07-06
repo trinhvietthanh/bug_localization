@@ -4,7 +4,6 @@ from commands.evaluate import cmd_evaluate
 from commands.index import cmd_index
 from commands.graph import cmd_graph
 from commands.defects4j import cmd_defects4j
-from commands.bugsinpy import cmd_bugsinpy
 from commands.swebench import cmd_swebench
 
 __all__ = [
@@ -13,6 +12,5 @@ __all__ = [
     "cmd_index",
     "cmd_graph",
     "cmd_defects4j",
-    "cmd_bugsinpy",
     "cmd_swebench",
 ]

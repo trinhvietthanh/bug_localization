@@ -24,6 +24,8 @@ class ScoringWeights:
     graph_proximity: float = 0.8
     semantic_similarity: float = 0.6
     method_count_boost: float = 0.3
+    git_recency: float = 0.5
+    git_recency_half_life_days: int = 90
     test_file_penalty: float = 0.5
 
 
@@ -40,6 +42,7 @@ class CandidateScore:
     graph_score: float = 0.0
     semantic_score: float = 0.0
     method_boost: float = 0.0
+    git_recency_score: float = 0.0
     penalty: float = 0.0
     rank: int = 0
 
@@ -56,11 +59,15 @@ class UnifiedScorer:
     5. Graph RAG proximity scores
     6. Semantic similarity scores
     7. Method count aggregation
-    8. Test file penalty
+    8. Git-recency (recently-changed files are more likely buggy)
+    9. Test file penalty
     """
 
     def __init__(self, weights: Optional[ScoringWeights] = None):
         self.weights = weights or ScoringWeights()
+        # Cache last-commit timestamps (seconds since epoch) per file path
+        # within the current repo to avoid repeated git subprocess calls.
+        self._git_recency_cache: dict[str, float] = {}
 
     def score_candidates(
         self,
@@ -73,6 +80,7 @@ class UnifiedScorer:
         graph_scores: dict[str, float] = None,
         semantic_scores: dict[str, float] = None,
         method_counts: dict[str, int] = None,
+        git_recency_scores: dict[str, float] = None,
     ) -> list[CandidateScore]:
         """
         Score all candidates and return sorted by total score.
@@ -87,6 +95,9 @@ class UnifiedScorer:
             graph_scores: Graph RAG proximity scores (file -> score)
             semantic_scores: Semantic similarity scores (file -> score)
             method_counts: Number of suspicious methods per file
+            git_recency_scores: Pre-computed recency scores [0,1] per file
+                (1 = touched in the most recent commit, decays with age).
+                If None, scores are computed lazily via git log.
 
         Returns:
             List of CandidateScore objects sorted by total_score (descending)
@@ -98,10 +109,15 @@ class UnifiedScorer:
         graph_scores = graph_scores or {}
         semantic_scores = semantic_scores or {}
         method_counts = method_counts or {}
+        git_recency_scores = dict(git_recency_scores) if git_recency_scores else None
 
         scores = []
 
         for file_path in candidates:
+            if git_recency_scores is None:
+                recency = self._compute_git_recency_score(file_path, repo_path)
+            else:
+                recency = git_recency_scores.get(file_path, 0.0)
             score = self._score_single(
                 file_path=file_path,
                 repo_path=repo_path,
@@ -112,6 +128,7 @@ class UnifiedScorer:
                 graph_score=graph_scores.get(file_path, 0.0),
                 semantic_score=semantic_scores.get(file_path, 0.0),
                 method_count=method_counts.get(file_path, 0),
+                git_recency=recency,
             )
             scores.append(score)
 
@@ -132,6 +149,7 @@ class UnifiedScorer:
         graph_score: float,
         semantic_score: float,
         method_count: int,
+        git_recency: float = 0.0,
     ) -> CandidateScore:
         """Score a single candidate file."""
         score = CandidateScore(file_path=file_path)
@@ -162,6 +180,9 @@ class UnifiedScorer:
         if method_count > 1:
             score.method_boost = (method_count - 1) * w.method_count_boost
 
+        if git_recency > 0:
+            score.git_recency_score = git_recency * w.git_recency
+
         if self._is_test_file(file_path):
             score.penalty = w.test_file_penalty
 
@@ -173,6 +194,7 @@ class UnifiedScorer:
             + score.graph_score
             + score.semantic_score
             + score.method_boost
+            + score.git_recency_score
             - score.penalty
         )
 
@@ -224,6 +246,60 @@ class UnifiedScorer:
             "_spec.",
         ]
         return any(ind in path_lower for ind in indicators)
+
+    def _compute_git_recency_score(
+        self, file_path: str, repo_path: str
+    ) -> float:
+        """
+        Score [0, 1] based on how recently the file was last touched by a commit.
+
+        Uses exponential decay with a configurable half-life (default 90 days):
+        ``score = 0.5 ** (age_days / half_life_days)``.
+
+        - File touched today:     score = 1.0
+        - Half-life days ago:     score = 0.5
+        - 2x half-life days ago:  score = 0.25
+        - Never touched / not in git / git unavailable: score = 0.0
+
+        Results are cached on the scorer instance for the lifetime of one
+        localization run (one repo), keyed by file path.
+        """
+        if file_path in self._git_recency_cache:
+            return self._git_recency_cache[file_path]
+
+        import subprocess
+        import time
+
+        half_life = max(1, self.weights.git_recency_half_life_days)
+        try:
+            result = subprocess.run(
+                ["git", "log", "-1", "--format=%ct", "--", file_path],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            self._git_recency_cache[file_path] = 0.0
+            return 0.0
+
+        if result.returncode != 0 or not result.stdout.strip():
+            self._git_recency_cache[file_path] = 0.0
+            return 0.0
+
+        try:
+            last_commit_ts = int(result.stdout.strip())
+        except ValueError:
+            self._git_recency_cache[file_path] = 0.0
+            return 0.0
+
+        age_seconds = max(0.0, time.time() - last_commit_ts)
+        age_days = age_seconds / 86400.0
+        score = 0.5 ** (age_days / half_life)
+        # Clamp to [0, 1]
+        score = max(0.0, min(1.0, score))
+        self._git_recency_cache[file_path] = score
+        return score
 
 def extract_llm_scores_from_locations(
     ranked_locations: list[dict],

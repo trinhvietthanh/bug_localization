@@ -333,8 +333,39 @@ class BaseAgent(ABC):
 
                 return result
 
-        # Exceeded max iterations
-        logger.warning(f"[{self.name}] Exceeded max iterations ({max_iterations})")
+        # Exceeded max iterations — force one final tool-free answer instead of
+        # discarding everything the agent learned. Costs one extra LLM call and
+        # converts "ran out of iterations" runs into usable ranked output.
+        logger.warning(
+            f"[{self.name}] Exceeded max iterations ({max_iterations}) — "
+            "forcing final answer without tools"
+        )
+        messages.append({
+            "role": "user",
+            "content": (
+                "You have reached the tool-call limit. Do NOT call any more tools. "
+                "Based on everything you have seen so far, provide your final answer "
+                "NOW in the required JSON format."
+            ),
+        })
+        try:
+            response = self._call_llm(messages, context, use_tools=False)
+            result.num_llm_calls += 1
+            usage = getattr(response, "usage", None)
+            if usage:
+                result.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                result.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+                result.total_tokens += getattr(usage, "total_tokens", 0) or 0
+            final_content = response.choices[0].message.content or ""
+            if final_content.strip():
+                result.output = self._parse_output(final_content)
+                result.explanation = final_content
+                result.success = True
+                context.add_trace(self.name, "forced_final_answer", final_content[:300])
+                return result
+        except Exception as e:
+            logger.error(f"[{self.name}] Forced final answer failed: {e}")
+
         result.success = False
         result.error = f"Exceeded maximum iterations ({max_iterations})"
         return result
@@ -376,7 +407,12 @@ class BaseAgent(ABC):
 
         return [system] + rest
 
-    def _call_llm(self, messages: list[dict], context: AgentContext | None = None) -> Any:
+    def _call_llm(
+        self,
+        messages: list[dict],
+        context: AgentContext | None = None,
+        use_tools: bool = True,
+    ) -> Any:
         """Make an LLM API call."""
         temperature = config.llm.temperature
         if context is not None and context.temperature_override is not None:
@@ -388,7 +424,7 @@ class BaseAgent(ABC):
             "max_tokens": config.llm.max_tokens,
         }
 
-        if self.tool_schemas:
+        if self.tool_schemas and use_tools:
             kwargs["tools"] = self.tool_schemas
             kwargs["tool_choice"] = "auto"
 
@@ -438,36 +474,58 @@ class BaseAgent(ABC):
             logger.error(f"Tool '{tool_name}' failed: {e}")
             return f"Error executing tool '{tool_name}': {e}"
 
+    @staticmethod
+    def _loads_lenient(text: str):
+        """
+        json.loads with repair fallbacks for common LLM output defects:
+        invalid backslash escapes (regex snippets like \\w, \\A inside strings)
+        and trailing commas before } or ].
+        """
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Double lone backslashes that don't start a valid JSON escape.
+        # The (\\\\) alternative consumes already-escaped pairs atomically so
+        # the tail of a valid "\\" is never treated as a lone backslash.
+        repaired = re.sub(
+            r'(\\\\)|\\(?!["/bfnrtu\\])',
+            lambda m: m.group(1) if m.group(1) else '\\\\',
+            text,
+        )
+        repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+        try:
+            return json.loads(repaired)
+        except (json.JSONDecodeError, ValueError):
+            return None
+
     def _parse_output(self, content: str) -> dict:
         """Try to parse JSON from the LLM's final response."""
         # 1. Try fenced JSON block
         json_match = re.search(r'```json\s*(.*?)\s*```', content, re.DOTALL)
         if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
+            parsed = self._loads_lenient(json_match.group(1))
+            if parsed is not None:
+                return parsed
 
         # 2. Try any fenced code block (model may omit 'json' label)
         code_match = re.search(r'```\s*(\{.*?\})\s*```', content, re.DOTALL)
         if code_match:
-            try:
-                return json.loads(code_match.group(1))
-            except json.JSONDecodeError:
-                pass
+            parsed = self._loads_lenient(code_match.group(1))
+            if parsed is not None:
+                return parsed
 
         # 3. Try finding a bare JSON object in the text
         brace_match = re.search(r'\{[\s\S]*"ranked_locations"[\s\S]*\}', content)
         if brace_match:
-            try:
-                return json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
-                pass
+            parsed = self._loads_lenient(brace_match.group(0))
+            if parsed is not None:
+                return parsed
 
         # 4. Try parsing the entire content as JSON
-        try:
-            return json.loads(content)
-        except (json.JSONDecodeError, ValueError):
-            pass
+        parsed = self._loads_lenient(content)
+        if parsed is not None:
+            return parsed
 
         return {"raw_response": content}

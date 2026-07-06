@@ -79,6 +79,8 @@ class ScoringConfig:
     weight_graph_proximity: float = float(os.getenv("SCORE_WEIGHT_GRAPH", "0.8"))
     weight_semantic: float = float(os.getenv("SCORE_WEIGHT_SEMANTIC", "0.6"))
     weight_method_count: float = float(os.getenv("SCORE_WEIGHT_METHOD", "0.3"))
+    weight_git_recency: float = float(os.getenv("SCORE_WEIGHT_GIT_RECENCY", "0.5"))
+    git_recency_half_life_days: int = int(os.getenv("SCORE_GIT_RECENCY_HALFLIFE_DAYS", "90"))
     test_file_penalty: float = float(os.getenv("SCORE_TEST_PENALTY", "0.5"))
     enable_unified_scoring: bool = os.getenv(
         "ENABLE_UNIFIED_SCORING", "true"

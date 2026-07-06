@@ -68,7 +68,6 @@ CLI dispatcher với 7 subcommand:
 | `index` | Index codebase vào Qdrant |
 | `graph` | Build/query Code Property Graph |
 | `defects4j` | Benchmark Defects4J (Java) |
-| `bugsinpy` | Benchmark BugsInPy (Python) |
 | `swebench` | Benchmark SWE-bench |
 
 ### `config.py` — Dataclasses cấu hình
@@ -613,7 +612,6 @@ class BugInstance:
 |--------|-----------|---------|-------|
 | `SWEBenchLoader` | SWE-bench | Python | HuggingFace dataset |
 | `Defects4JLoader` | Defects4J | Java | Local checkouts |
-| `BugsInPyLoader` | BugsInPy | Python | Local checkouts |
 
 ---
 
@@ -625,7 +623,6 @@ class BugInstance:
 | `index.py` | `index --repo-path` | Index vào Qdrant, hỗ trợ `--clear` |
 | `graph.py` | `graph --repo-path` | Build CPG, query `--callers`, `--callees`, `--stats`, `--visualize` |
 | `defects4j.py` | `defects4j --project --limit` | Batch eval với `--workers`, `--list-bugs` |
-| `bugsinpy.py` | `bugsinpy --project --limit` | Batch eval BugsInPy |
 | `swebench.py` | `swebench --split --limit` | Batch eval SWE-bench, `--dry-run` |
 | `evaluate.py` | `evaluate --limit` | Generic evaluation via SWEBenchLoader |
 | `_shared.py` | — | `make_orchestrator()`, `process_bug()` với timeout |
@@ -639,7 +636,6 @@ main.py
     └── commands/
             ├── localize.py ─────────────────────────────┐
             ├── defects4j.py ── _shared.py ──────────────┤
-            ├── bugsinpy.py  ──     │                    │
             └── swebench.py  ──     │                    │
                                     ▼                    ▼
                              agents/orchestrator.py
@@ -719,8 +715,7 @@ thesis/
 ├── data/
 │   ├── loader.py                    # BugInstance, SWEBenchLoader
 │   ├── preprocessor.py              # BugReportPreprocessor
-│   ├── defects4j_loader.py          # Defects4J benchmark loader
-│   └── bugsinpy_loader.py           # BugsInPy benchmark loader
+│   └── defects4j_loader.py          # Defects4J benchmark loader
 │
 ├── evaluation/
 │   ├── evaluator.py                 # BenchmarkEvaluator (sequential + parallel)
@@ -734,7 +729,6 @@ thesis/
 │   ├── index.py                     # Codebase indexing
 │   ├── graph.py                     # CPG build + query CLI
 │   ├── defects4j.py                 # Defects4J batch evaluation
-│   ├── bugsinpy.py                  # BugsInPy batch evaluation
 │   ├── swebench.py                  # SWE-bench batch evaluation
 │   └── evaluate.py                  # Generic evaluation
 │
@@ -779,7 +773,6 @@ Tất cả metrics áp dụng cho cả **file-level** và **method-level** predi
 |-----------|---------|--------------|--------|
 | **Defects4J** | Java | Lang, Math, Time, Closure, Mockito | `Defects4JLoader` |
 | **SWE-bench** | Python | django, astropy, flask, pandas | `SWEBenchLoader` |
-| **BugsInPy** | Python | pandas, scrapy, keras, black | `BugsInPyLoader` |
 
 ---
 

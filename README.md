@@ -2,6 +2,8 @@
 
 Hệ thống **Bug Localization** sử dụng kiến trúc **Multi-Agent AI** để tự động xác định vị trí lỗi trong codebase dựa trên bug report.
 
+> 📐 **Tài liệu:** [Thiết kế hệ thống & định hướng nghiên cứu](docs/SYSTEM_DESIGN.md) (giả thuyết, phương pháp thực nghiệm, lộ trình) · [Kiến trúc chi tiết](ARCHITECTURE.md)
+
 ## Architecture
 
 ```
@@ -89,34 +91,7 @@ This will checkout `Lang_1` to `Lang_15` into `data/defects4j_checkouts/`.
 
 **Supported Projects**: Closure (156), Lang (56), Math (85), Mockito (22), Time (23)
 
-### 6. BugsInPy Benchmark (Python)
-```bash
-# List available Python bugs
-python main.py bugsinpy --list-bugs --project thefuck
-
-# View a single bug (with ground truth)
-python main.py bugsinpy --instance-id thefuck_1
-
-# Run pipeline on a single bug with checked-out repo
-python main.py bugsinpy --instance-id thefuck_1 --repo-path data/bugsinpy_checkouts/thefuck/thefuck_1
-
-# Batch evaluate on thefuck project (first 10 bugs)
-python main.py bugsinpy --project thefuck --limit 10 --repo-path data/bugsinpy_checkouts --output results/bip_thefuck.csv
-```
-
-**Setup BugsInPy Checkouts:**
-```bash
-# Clone BugsInPy metadata
-git clone https://github.com/soarsmu/BugsInPy ../BugsInPy
-
-# Checkout bugs for specific projects
-python scripts/checkout_bugsinpy.py --project thefuck --limit 5
-python scripts/checkout_bugsinpy.py --project black --all
-```
-
-**Supported Projects (493 total bugs):** ansible (18), black (23), cookiecutter (4), fastapi (16), httpie (5), keras (45), luigi (33), matplotlib (30), pandas (169), PySnooper (3), sanic (5), scrapy (40), spacy (10), thefuck (32), tornado (16), tqdm (9), youtube-dl (43)
-
-### 7. Web UI
+### 6. Web UI
 
 A React + FastAPI web interface for testing the bug localization system.
 

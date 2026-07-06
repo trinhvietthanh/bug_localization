@@ -240,15 +240,18 @@ class Orchestrator:
 
         # Build Code Property Graph in background (ready by Phase 2)
         graph_future: Future | None = None
-        graph_cache_key = self._repo_cache_key(
-            repo_path, "java" if is_java else "python"
-        )
+        language = "java" if is_java else "python"
+        graph_cache_key = self._repo_cache_key(repo_path, language)
         cached = self._get_cached_graph(graph_cache_key)
         if config.enable_graph_rag and cached is not None:
+            if verbose:
+                console.print(f"  ♻️  Reusing cached graph (key={graph_cache_key[:60]}...)")
             context.graph_retriever = cached
         elif config.enable_graph_rag:
             executor = ThreadPoolExecutor(max_workers=1)
-            graph_future = executor.submit(self._build_graph, repo_path, verbose)
+            graph_future = executor.submit(
+                self._build_graph, repo_path, verbose, graph_cache_key
+            )
             executor.shutdown(wait=False)
 
         # === Phase 1: Fault Comprehension ===
@@ -296,6 +299,7 @@ class Orchestrator:
             try:
                 graph_retriever = graph_future.result(timeout=300)
                 context.graph_retriever = graph_retriever
+                # Cache using the key so future instances with same commit reuse it
                 self._set_cached_graph(graph_cache_key, graph_retriever)
                 if verbose:
                     stats = graph_retriever.graph.stats()
@@ -435,7 +439,7 @@ class Orchestrator:
                         "source": "log_analysis",
                     })
 
-            result.ranked_files = context.candidate_files
+            result.ranked_files = self._build_candidate_pool(result, context)
             result.ranked_methods = extract_methods_from_locations(
                 result.ranked_locations
             )
@@ -456,12 +460,12 @@ class Orchestrator:
             if verbose:
                 self._print_results(result)
         else:
-            result.ranked_files = context.candidate_files
-            result.success = bool(context.candidate_files)
+            result.ranked_files = self._build_candidate_pool(result, context)
+            result.success = bool(result.ranked_files)
             if verbose and conf_result is not None:
                 console.print(f"  ❌ Confirmation failed: {conf_result.error}")
                 console.print(
-                    f"  ⚠️  Falling back to navigation results: {context.candidate_files}"
+                    f"  ⚠️  Falling back to candidate pool: {result.ranked_files[:10]}"
                 )
 
         # Filter out file paths that do not exist in the checked-out repo
@@ -593,6 +597,153 @@ class Orchestrator:
         }
         return final_result
 
+    # Minimum number of files the final ranked list should contain so that
+    # Top-5/Top-10 metrics have room to hit even when the LLM's confirmed
+    # list is short. Padded files carry no LLM confidence, so with unified
+    # scoring enabled they only outrank confirmed files on strong signals
+    # (stack trace, mentioned in report).
+    MIN_RANKED_FILES: int = int(os.environ.get("MIN_RANKED_FILES", "10"))
+
+    def _build_candidate_pool(
+        self, result: LocalizationResult, context: AgentContext
+    ) -> list[str]:
+        """
+        Merge every candidate source into one ordered, deduplicated pool.
+
+        Priority order: confirmed locations → navigation candidates →
+        stack-trace files → files mentioned in the report → test-derived
+        candidates → semantic retriever hits → graph retriever hits.
+        Later sources are only consulted until the pool reaches
+        MIN_RANKED_FILES entries.
+        """
+        pool: list[str] = []
+        seen: set[str] = set()
+
+        def _add(fp: str) -> None:
+            fp = (fp or "").strip().lstrip("/")
+            if fp and fp not in seen:
+                seen.add(fp)
+                pool.append(fp)
+
+        for loc in result.ranked_locations or []:
+            _add(loc.get("file_path", ""))
+        for fp in context.candidate_files or []:
+            _add(fp)
+        for fp in context.stack_trace_files or []:
+            _add(fp)
+        for fp in context.mentioned_files or []:
+            _add(fp)
+        for fp in context.test_derived_candidates or []:
+            _add(fp)
+
+        # Expensive sources only when the pool is still thin
+        if len(pool) < self.MIN_RANKED_FILES and context.retriever is not None:
+            try:
+                query = context.problem_statement[:4000]
+                try:
+                    hits = context.retriever.hybrid_get_similar_files(
+                        query,
+                        top_k=self.MIN_RANKED_FILES,
+                        repo_filter=context.repo_id or None,
+                    )
+                except AttributeError:
+                    hits = context.retriever.get_similar_files(
+                        query,
+                        top_k=self.MIN_RANKED_FILES,
+                        repo_filter=context.repo_id or None,
+                    )
+                for hit in hits:
+                    if isinstance(hit, dict):
+                        _add(hit.get("file_path", ""))
+                    else:
+                        _add(str(hit))
+            except Exception as e:
+                logger.debug(f"[CandidatePool] semantic retrieval failed: {e}")
+
+        if len(pool) < self.MIN_RANKED_FILES and context.graph_retriever is not None:
+            try:
+                nodes = context.graph_retriever.search(
+                    context.problem_statement[:4000],
+                    top_k=self.MIN_RANKED_FILES,
+                )
+                for node in nodes:
+                    _add(node.data.get("file_path", ""))
+            except Exception as e:
+                logger.debug(f"[CandidatePool] graph retrieval failed: {e}")
+
+        # Last resort needs no index or API: match bug-report keywords against
+        # source file paths. Covers eval runs where no retriever is wired up.
+        if len(pool) < self.MIN_RANKED_FILES:
+            try:
+                for fp in self._path_keyword_candidates(
+                    context, top_k=self.MIN_RANKED_FILES,
+                ):
+                    _add(fp)
+            except Exception as e:
+                logger.debug(f"[CandidatePool] path-keyword matching failed: {e}")
+
+        return pool
+
+    _POOL_SKIP_DIRS = {
+        ".git", "__pycache__", "node_modules", "build", "dist", "target",
+        "docs", "doc", "examples", "benchmarks", ".tox", "venv", ".venv",
+        "tests", "test", "testing",
+    }
+
+    @staticmethod
+    def _path_keyword_candidates(
+        context: AgentContext, top_k: int = 10
+    ) -> list[str]:
+        """
+        Rank source files by how strongly their path matches identifiers from
+        the bug report (preprocessor keywords + mentioned functions).
+
+        Pure filesystem walk — no LLM, no vector index — so it always works.
+        A keyword like "autodetector" or "sqlmigrate" pointing straight at
+        django/db/migrations/autodetector.py is exactly the case this catches.
+        """
+        repo_path = context.repo_path
+        if not repo_path or not os.path.isdir(repo_path):
+            return []
+
+        import re as _re
+
+        def _subtokens(identifier: str) -> list[str]:
+            parts = _re.split(r"_+|(?<=[a-z0-9])(?=[A-Z])", identifier)
+            toks = [p.lower() for p in parts if len(p) >= 4]
+            if len(identifier) >= 4:
+                toks.append(identifier.lower())
+            return toks
+
+        tokens: set[str] = set()
+        for kw in (context.keywords or []) + (context.mentioned_functions or []):
+            tokens.update(_subtokens(str(kw)))
+        if not tokens:
+            return []
+
+        ext = (context.file_extension or "*.py").lstrip("*")
+        skip_dirs = Orchestrator._POOL_SKIP_DIRS
+        scored: list[tuple[float, str]] = []
+        for root, dirs, files in os.walk(repo_path):
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+            for fname in files:
+                if not fname.endswith(ext):
+                    continue
+                rel = os.path.relpath(os.path.join(root, fname), repo_path)
+                rel_lower = rel.lower()
+                base_lower = fname.lower()
+                score = 0.0
+                for tok in tokens:
+                    if tok in base_lower:
+                        score += 2.0 * len(tok)
+                    elif tok in rel_lower:
+                        score += float(len(tok))
+                if score >= 8.0:  # require at least one solid (4+ char) basename hit
+                    scored.append((score, rel))
+
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return [rel for _, rel in scored[:top_k]]
+
     @staticmethod
     def _filter_nonexistent_files(
         ranked_files: list[str], repo_path: str
@@ -634,6 +785,16 @@ class Orchestrator:
                     if c.startswith(root):
                         extra.append(c[len(root):])
             candidates.extend(extra)
+
+            # A module predicted as "pkg/mod.py" may actually live at
+            # "pkg/mod/__init__.py" (common in django: models/fields.py →
+            # models/fields/__init__.py). Try that variant before giving up.
+            pkg_variants = [
+                c[:-3] + "/__init__.py"
+                for c in candidates
+                if c.endswith(".py") and not c.endswith("__init__.py")
+            ]
+            candidates.extend(pkg_variants)
 
             for c in candidates:
                 if os.path.isfile(os.path.join(repo_path, c)):
@@ -711,6 +872,8 @@ class Orchestrator:
             graph_proximity=config.scoring.weight_graph_proximity,
             semantic_similarity=config.scoring.weight_semantic,
             method_count_boost=config.scoring.weight_method_count,
+            git_recency=config.scoring.weight_git_recency,
+            git_recency_half_life_days=config.scoring.git_recency_half_life_days,
             test_file_penalty=config.scoring.test_file_penalty,
         )
 
@@ -734,6 +897,20 @@ class Orchestrator:
             except Exception as e:
                 logger.debug(f"Graph scoring failed: {e}")
 
+        semantic_scores = {}
+        if context.retriever is not None and result.ranked_files:
+            try:
+                hits = context.retriever.get_similar_files(
+                    context.problem_statement[:4000],
+                    top_k=len(result.ranked_files),
+                    repo_filter=context.repo_id or None,
+                )
+                semantic_scores = {
+                    h["file_path"]: float(h.get("score", 0.0)) for h in hits
+                }
+            except Exception as e:
+                logger.debug(f"Semantic scoring failed: {e}")
+
         candidate_scores = scorer.score_candidates(
             candidates=result.ranked_files,
             repo_path=context.repo_path,
@@ -742,6 +919,7 @@ class Orchestrator:
             mentioned_files=processed.mentioned_files,
             llm_scores=llm_scores,
             graph_scores=graph_scores,
+            semantic_scores=semantic_scores,
             method_counts=method_counts,
         )
 
@@ -811,8 +989,16 @@ class Orchestrator:
     @staticmethod
     def _repo_cache_key(repo_path: str, language: str) -> str:
         """
-        Build graph cache key tied to repo HEAD so cache does not go stale
-        when the same path moves to another commit.
+        Build a graph cache key based on (repo_name, git_commit, language).
+
+        Using the repo name + commit instead of the full checkout path means
+        that multiple SWE-bench instances sharing the same base_commit will
+        reuse the same cached graph — no redundant rebuilds.
+
+        Example:
+            astropy__astropy-12907  (commit abc123)  ─┐
+            astropy__astropy-12891  (commit abc123)  ─┴─▶ same cache key
+            astropy__astropy-13032  (commit def456)       ─▶ different key
         """
         head = ""
         try:
@@ -826,11 +1012,34 @@ class Orchestrator:
             head = result.stdout.strip()
         except Exception:
             head = ""
-        return f"{repo_path}|{language}|{head}"
+
+        # Extract a stable repo identifier: drop the trailing instance-id suffix.
+        # e.g. "data/swebench_checkouts/astropy__astropy/astropy__astropy-12907"
+        #   → repo_name = "astropy__astropy"
+        # For arbitrary paths (manual use) fall back to the basename.
+        path_parts = os.path.normpath(repo_path).split(os.sep)
+        # Walk backwards: first segment that does NOT look like an instance-id
+        # (instance-ids contain digits after a dash, e.g. "astropy__astropy-12907")
+        repo_name = path_parts[-1]  # fallback
+        for part in reversed(path_parts):
+            if part and not part.split("-")[-1].isdigit():
+                repo_name = part
+                break
+
+        return f"{repo_name}|{language}|{head}"
 
     @staticmethod
-    def _build_graph(repo_path: str, verbose: bool = False):
-        """Build Code Property Graph for a repository (runs in background thread)."""
+    def _build_graph(repo_path: str, verbose: bool = False, repo_id: str = ""):
+        """Build Code Property Graph for a repository (runs in background thread).
+
+        Args:
+            repo_path: Checkout path of the repo.
+            verbose: Print progress messages.
+            repo_id: Stable repo identifier used as Neo4j partition key
+                     (e.g. "astropy__astropy|python|abc123"). When provided,
+                     the Neo4j backend only loads/stores nodes belonging to
+                     this repo, avoiding cross-repo contamination.
+        """
         from rag.graph_retriever import GraphRetriever
         from rag.code_graph import get_or_build_graph
 
@@ -845,6 +1054,7 @@ class Orchestrator:
                     neo4j_user=neo4j_cfg.user,
                     neo4j_password=neo4j_cfg.password,
                     neo4j_database=neo4j_cfg.database,
+                    repo_id=repo_id,
                 )
                 retriever = GraphRetriever(graph=graph, repo_path=repo_path)
                 retriever._prepare_indexes()
@@ -906,25 +1116,31 @@ class Orchestrator:
         return seen
 
     def _print_results(self, result: LocalizationResult):
-        """Print formatted results."""
-        table = Table(title="🎯 Localization Results")
-        table.add_column("Rank", style="bold")
+        """Print formatted results (file-level)."""
+        table = Table(title="🎯 Localization Results (File-Level)")
+        table.add_column("Rank", style="bold", width=5)
         table.add_column("File", style="cyan")
-        table.add_column("Function", style="green")
-        table.add_column("Confidence", style="yellow")
-        table.add_column("Explanation", max_width=50)
+        table.add_column("Confidence", style="yellow", width=12)
+        table.add_column("Explanation", max_width=60)
 
-        for loc in result.ranked_locations[:10]:
-            func = loc.get("function_name", "")
-            if loc.get("class_name"):
-                func = f"{loc['class_name']}.{func}"
+        # Deduplicate by file_path — keep highest confidence entry per file
+        seen_files: dict[str, dict] = {}
+        for loc in result.ranked_locations:
+            fp = loc.get("file_path", "")
+            if not fp:
+                continue
+            if fp not in seen_files or loc.get("confidence", 0) > seen_files[fp].get("confidence", 0):
+                seen_files[fp] = loc
 
+        # Re-rank deduplicated file list by confidence descending
+        deduped = sorted(seen_files.values(), key=lambda x: x.get("confidence", 0), reverse=True)
+
+        for rank, loc in enumerate(deduped[:10], 1):
             table.add_row(
-                str(loc.get("rank", "?")),
+                str(rank),
                 loc.get("file_path", "?"),
-                func,
                 f"{loc.get('confidence', 0):.2f}",
-                loc.get("explanation", "")[:50] + "...",
+                loc.get("explanation", "")[:60] + "...",
             )
 
         console.print(table)

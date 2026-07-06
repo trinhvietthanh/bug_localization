@@ -222,7 +222,10 @@ class NavigationAgent(BaseAgent):
                     qualified = fp + "::" + loc["class_name"] + "." + fn
                 methods.append(qualified)
 
-        context.candidate_files = files
+        # Navigation's findings go first, but keep earlier candidates (e.g.
+        # stack-trace/log-analysis seeds) behind them instead of dropping them.
+        prior = [f for f in context.candidate_files if f not in files]
+        context.candidate_files = files + prior
         context.candidate_methods = methods
 
         # Replace prior navigation blob so Confirmation sees this round only

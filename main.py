@@ -50,7 +50,6 @@ from commands.evaluate import cmd_evaluate
 from commands.index import cmd_index
 from commands.graph import cmd_graph
 from commands.defects4j import cmd_defects4j
-from commands.bugsinpy import cmd_bugsinpy
 from commands.swebench import cmd_swebench
 
 
@@ -165,20 +164,6 @@ def main():
         help="Minimum top-1 confidence to skip reflection",
     )
 
-    # bugsinpy command
-    bip_parser = subparsers.add_parser("bugsinpy", help="Evaluate on BugsInPy benchmark (Python)")
-    bip_parser.add_argument("--project", type=str, help="Project name")
-    bip_parser.add_argument("--instance-id", type=str, help="Single instance ID")
-    bip_parser.add_argument("--repo-path", type=str, help="Path to checked-out buggy repo")
-    bip_parser.add_argument("--limit", type=int, help="Max instances to evaluate")
-    bip_parser.add_argument(
-        "--workers", type=int, default=1, help="Number of concurrent bug evaluations"
-    )
-    bip_parser.add_argument("--output", type=str, help="Output JSON path")
-    bip_parser.add_argument("--verbose", action="store_true", help="Verbose output")
-    bip_parser.add_argument("--list-bugs", action="store_true", help="Just list available bugs")
-    bip_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
-
     # swebench command
     swe_parser = subparsers.add_parser("swebench", help="Evaluate on SWE-bench benchmark")
     swe_parser.add_argument(
@@ -209,7 +194,6 @@ def main():
         "index": cmd_index,
         "graph": cmd_graph,
         "defects4j": cmd_defects4j,
-        "bugsinpy": cmd_bugsinpy,
         "swebench": cmd_swebench,
     }
 

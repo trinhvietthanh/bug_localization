@@ -13,7 +13,6 @@ mcp_server: mcp_server.py
 benchmarks:
   - Defects4J (Java): Top-1 ~55–65%, MRR ~0.62 [Lang, Math, Time, Closure, Mockito]
   - SWE-bench Lite (Python): Top-1 ~35–45%, MRR ~0.41
-  - BugsInPy (Python): Top-1 ~50–60%, MRR ~0.58
 ---
 
 # Bug Localization Skill
@@ -59,7 +58,7 @@ Phase 1 and injected before Phase 2 to enable call-graph analysis.
 Invoke this skill when:
 - A user provides a bug report / issue / error description and a repo path
 - You need to identify which file(s) or function(s) are most likely responsible for a defect
-- You are running a benchmark evaluation (Defects4J, SWE-bench, BugsInPy)
+- You are running a benchmark evaluation (Defects4J, SWE-bench)
 - You want automated root-cause analysis before writing a patch
 
 Do **not** invoke this skill when:
@@ -255,7 +254,6 @@ this skill from scratch should provide equivalent tool implementations.
 |---|---|---|---|
 | **Defects4J** | Java | Lang, Math, Time, Closure, Mockito | Pre-checkout required: `defects4j checkout` |
 | **SWE-bench Lite** | Python | django, astropy, flask, pandas, sympy, … | Loaded from Hugging Face datasets |
-| **BugsInPy** | Python | pandas, scrapy, keras, black, thefuck, … | Pre-checkout via `scripts/checkout_bugsinpy.py` |
 
 ---
 
@@ -279,11 +277,6 @@ python main.py localize \
 python main.py defects4j \
   --project Lang --instance-id Lang_1 \
   --repo-path data/defects4j_checkouts/Lang/Lang_1
-
-# BugsInPy
-python main.py bugsinpy \
-  --project pandas --limit 5 \
-  --repo-path data/bugsinpy_checkouts
 ```
 
 ### Python API

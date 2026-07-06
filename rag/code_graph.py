@@ -789,22 +789,22 @@ def get_or_build_graph(
     neo4j_user: str = "neo4j",
     neo4j_password: str = "password",
     neo4j_database: str = "neo4j",
+    repo_id: str = "",
 ):
     """
     Get a graph backend — either in-memory or Neo4j.
 
-    When Neo4j is enabled, checks if a graph already exists in the database.
-    If it does (and has nodes), returns the existing Neo4j graph directly
-    without rebuilding. Otherwise builds from source and imports.
+    When Neo4j is enabled, checks if a graph already exists for this repo
+    (identified by repo_id).  If it does, returns the existing Neo4j graph
+    without rebuilding.  Otherwise builds from source and imports.
 
     Args:
         repo_path: Path to the repository
         language: "python", "java", or "auto"
         use_neo4j: Whether to use Neo4j backend
-        neo4j_uri: Neo4j Bolt URI
-        neo4j_user: Neo4j username
-        neo4j_password: Neo4j password
-        neo4j_database: Neo4j database name
+        neo4j_uri / neo4j_user / neo4j_password / neo4j_database: Neo4j connection
+        repo_id: Stable cache key (e.g. "astropy__astropy|python|abc123").
+                 Multiple instances with the same repo_id share one graph partition.
 
     Returns:
         GraphBackend instance (CodePropertyGraph or Neo4jGraph)
@@ -817,19 +817,23 @@ def get_or_build_graph(
     neo4j_graph = Neo4jGraph(
         uri=neo4j_uri, user=neo4j_user,
         password=neo4j_password, database=neo4j_database,
+        repo_id=repo_id,
     )
 
-    # Check if Neo4j already has data
+    # Check if Neo4j already has data for THIS repo partition
     stats = neo4j_graph.stats()
     if stats["total_nodes"] > 0:
         logger.info(
-            f"Using existing Neo4j graph: {stats['total_nodes']} nodes, "
-            f"{stats['total_edges']} edges"
+            f"Using existing Neo4j graph for repo_id='{repo_id}': "
+            f"{stats['total_nodes']} nodes, {stats['total_edges']} edges"
         )
         return neo4j_graph
 
-    # Build from source and import
-    logger.info("Neo4j graph empty — building from source and importing...")
+    # Build from source and import into this repo's partition
+    logger.info(
+        f"Neo4j partition empty for repo_id='{repo_id}' "
+        f"— building from source and importing..."
+    )
     in_memory = build_code_graph(repo_path, language=language)
     neo4j_graph.import_from_in_memory(in_memory)
     return neo4j_graph

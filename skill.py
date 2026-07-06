@@ -131,7 +131,6 @@ class BugLocalizationSkill:
             Benchmark instance identifier. Supported formats:
             - SWE-bench:  ``"django__django-11099"``
             - Defects4J:  ``"Lang_1"``, ``"Math_5"``
-            - BugsInPy:   ``"pandas_1"``, ``"thefuck_3"``
         repo_path : str, optional
             Path to pre-checked-out repo. If omitted, the system will attempt
             to checkout the repo automatically (requires network access /
@@ -213,16 +212,6 @@ class BugLocalizationSkill:
                 "requires_checkout": True,
                 "notes": "Run: scripts/checkout_swebench.py",
             },
-            "bugsinpy": {
-                "language": "Python",
-                "projects": [
-                    "pandas", "scrapy", "keras", "black", "thefuck",
-                    "ansible", "fastapi", "matplotlib",
-                ],
-                "instance_id_format": "pandas_1 / thefuck_3",
-                "requires_checkout": True,
-                "notes": "Run: scripts/checkout_bugsinpy.py",
-            },
         }
 
     # ------------------------------------------------------------------
@@ -267,18 +256,6 @@ class BugLocalizationSkill:
             except Exception as e:
                 logger.debug(f"[Skill] Defects4J load failed: {e}")
 
-        # BugsInPy: instance_id matches "project_N" (lower-case project)
-        parts = instance_id.rsplit("_", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            try:
-                from data.bugsinpy_loader import BugsInPyLoader, to_bug_instance
-                loader = BugsInPyLoader()
-                bip_bug = loader.load_instance(instance_id)
-                if bip_bug is not None:
-                    return to_bug_instance(bip_bug)
-            except Exception as e:
-                logger.debug(f"[Skill] BugsInPy load failed: {e}")
-
         # SWE-bench default
         from data.loader import SWEBenchLoader
         dataset = dataset or self._config.evaluation.dataset_name
@@ -287,6 +264,6 @@ class BugLocalizationSkill:
         if instance is None:
             raise ValueError(
                 f"Instance '{instance_id}' not found in dataset '{dataset}'. "
-                f"Also checked Defects4J and BugsInPy loaders."
+                f"Also checked the Defects4J loader."
             )
         return instance

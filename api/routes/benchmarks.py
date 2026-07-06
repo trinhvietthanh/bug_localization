@@ -35,15 +35,6 @@ async def list_projects(benchmark: str = "defects4j"):
                 ProjectInfo(name="Mockito", bug_count=38, language="Java"),
                 ProjectInfo(name="Time", bug_count=27, language="Java"),
             ]
-        elif benchmark == "bugsinpy":
-            return [
-                ProjectInfo(name="thefuck", bug_count=32, language="Python"),
-                ProjectInfo(name="black", bug_count=23, language="Python"),
-                ProjectInfo(name="pandas", bug_count=169, language="Python"),
-                ProjectInfo(name="keras", bug_count=45, language="Python"),
-                ProjectInfo(name="matplotlib", bug_count=30, language="Python"),
-                ProjectInfo(name="fastapi", bug_count=16, language="Python"),
-            ]
         else:
             raise HTTPException(
                 status_code=400, detail=f"Unknown benchmark: {benchmark}"
@@ -69,20 +60,6 @@ async def list_bugs(
                     BugInstance(
                         instance_id=inst.instance_id,
                         project=project or "Lang",
-                        problem_statement=inst.problem_statement[:500],
-                        buggy_files=inst.buggy_files,
-                    )
-                )
-        elif benchmark == "bugsinpy":
-            from data.bugsinpy_loader import BugsInPyLoader
-
-            loader = BugsInPyLoader()
-            instances = loader.load_project(project or "thefuck")
-            for inst in instances[:limit]:
-                bugs.append(
-                    BugInstance(
-                        instance_id=inst.instance_id,
-                        project=project or "thefuck",
                         problem_statement=inst.problem_statement[:500],
                         buggy_files=inst.buggy_files,
                     )
