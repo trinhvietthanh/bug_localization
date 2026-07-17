@@ -1,0 +1,46 @@
+flowchart TD
+    BR([Bug Report]) --> PRE[BugReportPreprocessor]
+
+    subgraph P0["Phase 0 — Tiền xử lý"]
+        PRE --> ST[Trích stack trace]
+        PRE --> EM[Trích error messages]
+        PRE --> MF[Trích mentioned files/functions]
+        PRE --> DP[Drain3 log analysis]
+        PRE --> TD["Java: test-class → source-class"]
+    end
+    PRE -.-> CTX[AgentContext]
+
+    REPO[(Mã nguồn)] -.-> CPG["Build CPG — nền, song song Phase 1\n(Neo4j nếu khả dụng, else in-memory)"]
+    CPG -.-> CTX2
+
+    subgraph P1["Phase 1 — Hiểu lỗi"]
+        CTX --> CA["Comprehension Agent\ntool loop (cap 4) + [E1] K=4 giả thuyết cạnh tranh"]
+        CA -->|fault hypothesis + suspected files + hypotheses| CTX2[AgentContext]
+    end
+
+    subgraph P2["Phase 2 — Khám phá ưu tiên [E2]"]
+        CTX2 --> PNA["PriorityNavigation Agent\nheap scheduler, cap 20 actions\nObservation gắn nhãn hypothesis_evidence trực tiếp"]
+        PNA --> CTX3[AgentContext: suspicious_locations]
+    end
+
+    subgraph P3["Phase 3 — Xác nhận & reflection"]
+        CTX3 --> COA["Confirmation Agent\ntool loop (cap 10)"]
+        COA --> RCHK{"confidence < 0.5\nvà round ≤ 2?"}
+        RCHK -->|Có, reflection feedback| CTX2
+        RCHK -->|Không| CTX5[AgentContext: ranked_locations]
+    end
+
+    subgraph POST["Hậu xử lý"]
+        CTX5 --> US["UnifiedScorer\n10 tín hiệu (bao gồm hypothesis_support [E1])"]
+        US --> RR["ListwiseReranker [E3]\nnarrowing file→function + rerank top-10\npermutation-only, fail-open"]
+        RR --> FV["File Validation\nnever-empty fallback"]
+    end
+
+    FV --> OUT([Kết quả: ranked files/methods/locations])
+
+    classDef agent fill:#e1f5fe,stroke:#03a9f4,stroke-width:2px;
+    classDef proc fill:#fff3e0,stroke:#ff9800,stroke-width:2px;
+    classDef ext fill:#fce4ec,stroke:#e91e63,stroke-width:2px,stroke-dasharray:4 2;
+    class CA,PNA,COA agent
+    class US,RR,PRE,FV proc
+    class CPG ext

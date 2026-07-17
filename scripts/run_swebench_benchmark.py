@@ -16,6 +16,7 @@ Usage:
 
 import sys
 import json
+import os
 import time
 import argparse
 import logging
@@ -189,6 +190,15 @@ def run_benchmark(args):
         dataset_instances = [single_inst]
     else:
         dataset_instances = loader.load(split=args.split)
+        if args.instance_ids_file:
+            wanted = {
+                line.strip()
+                for line in Path(args.instance_ids_file).read_text().splitlines()
+                if line.strip()
+            }
+            dataset_instances = [
+                i for i in dataset_instances if i.instance_id in wanted
+            ]
         if args.limit:
             dataset_instances = dataset_instances[:args.limit]
 
@@ -233,52 +243,76 @@ def run_benchmark(args):
     def process_single_bug(entry, orchestrator_obj, verbose_flag):
         bug = entry["bug"]
         repo_path = entry["repo_path"]
-        
+
+        # Instance-level retry: a single transient failure (network reset,
+        # quota burst) inside the multi-call pipeline used to mark the whole
+        # instance as failed. Re-run up to N times before giving up.
+        instance_retries = int(os.getenv("INSTANCE_MAX_RETRIES", "3"))
         start_t = time.time()
-        try:
-            res = orchestrator_obj.localize(
-                bug,
-                repo_path=repo_path,
-                verbose=verbose_flag,
-            )
-            
-            p_files = res.ranked_files
-            g_files = bug.buggy_files
-            
-            h1 = top_n_accuracy(p_files, g_files, 1)
-            h3 = top_n_accuracy(p_files, g_files, 3)
-            h5 = top_n_accuracy(p_files, g_files, 5)
-            r_r = reciprocal_rank(p_files, g_files)
-            a_p = average_precision(p_files, g_files)
-            
-            e_time = time.time() - start_t
-            
-            inst_res = {
-                "instance_id": bug.instance_id,
-                "predicted": p_files[:5],
-                "ground_truth": g_files,
-                "top1_hit": h1, "top3_hit": h3, "top5_hit": h5,
-                "rr": r_r, "ap": a_p, "time": e_time,
-                "success": res.success,
-                "llm_calls": res.total_llm_calls,
-                "tool_calls": res.total_tool_calls,
-                "root_cause": res.root_cause,
-                "explanation": res.explanation,
-                "error": None,
-            }
-            return (bug.instance_id, True, inst_res, p_files, g_files, e_time, None, h1, h3, h5, r_r)
-            
-        except Exception as ex:
-            e_time = time.time() - start_t
-            logger.error(f"Error evaluating {bug.instance_id}: {ex}", exc_info=True)
-            err_res = {
-                "instance_id": bug.instance_id,
-                "predicted": [], "ground_truth": bug.buggy_files,
-                "top1_hit": False, "top3_hit": False, "top5_hit": False,
-                "rr": 0.0, "ap": 0.0, "time": e_time,
-                "success": False, "error": str(ex),
-            }
-            return (bug.instance_id, False, err_res, [], bug.buggy_files, e_time, str(ex), False, False, False, 0.0)
+        last_ex = None
+        for attempt in range(instance_retries):
+            try:
+                res = orchestrator_obj.localize(
+                    bug,
+                    repo_path=repo_path,
+                    verbose=verbose_flag,
+                )
+
+                p_files = res.ranked_files
+                g_files = bug.buggy_files
+
+                h1 = top_n_accuracy(p_files, g_files, 1)
+                h3 = top_n_accuracy(p_files, g_files, 3)
+                h5 = top_n_accuracy(p_files, g_files, 5)
+                r_r = reciprocal_rank(p_files, g_files)
+                a_p = average_precision(p_files, g_files)
+
+                e_time = time.time() - start_t
+
+                inst_res = {
+                    "instance_id": bug.instance_id,
+                    "predicted": p_files[:5],
+                    "ground_truth": g_files,
+                    "top1_hit": h1, "top3_hit": h3, "top5_hit": h5,
+                    "rr": r_r, "ap": a_p, "time": e_time,
+                    "success": res.success,
+                    "llm_calls": res.total_llm_calls,
+                    "tool_calls": res.total_tool_calls,
+                    "root_cause": res.root_cause,
+                    "explanation": res.explanation,
+                    # Per-stage breakdown (llm calls per agent, patch-duel
+                    # outcome, unified score signals) — needed for offline
+                    # attribution of which stage caused a gain/loss
+                    "agent_results": {
+                        k: v for k, v in (res.agent_results or {}).items()
+                        if k != "unified_scores"  # too bulky for per-instance JSON
+                    },
+                    "instance_attempts": attempt + 1,
+                    "error": None,
+                }
+                return (bug.instance_id, True, inst_res, p_files, g_files, e_time, None, h1, h3, h5, r_r)
+
+            except Exception as ex:
+                last_ex = ex
+                e_time = time.time() - start_t
+                logger.error(
+                    f"Error evaluating {bug.instance_id} (attempt {attempt+1}/"
+                    f"{instance_retries}): {ex}"
+                )
+                if attempt < instance_retries - 1:
+                    backoff = 5.0 * (attempt + 1)
+                    time.sleep(backoff)
+
+        err_res = {
+            "instance_id": bug.instance_id,
+            "predicted": [], "ground_truth": bug.buggy_files,
+            "top1_hit": False, "top3_hit": False, "top5_hit": False,
+            "rr": 0.0, "ap": 0.0, "time": time.time() - start_t,
+            "success": False, "instance_attempts": instance_retries,
+            "error": str(last_ex),
+        }
+        return (bug.instance_id, False, err_res, [], bug.buggy_files,
+                time.time() - start_t, str(last_ex), False, False, False, 0.0)
 
     # Run Evaluation
     console.print(f"\n[bold cyan]🚀 Starting benchmark evaluation...[/bold cyan]")
@@ -429,6 +463,11 @@ def parse_args():
     parser.add_argument("--split", type=str, default="test")
     parser.add_argument("--instance-id", type=str, help="Run single instance")
     parser.add_argument("--limit", type=int, help="Max number of bugs to evaluate")
+    parser.add_argument(
+        "--instance-ids-file",
+        type=str,
+        help="Path to a file with one instance_id per line — evaluate only these",
+    )
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--output", type=str, default="results/swebench_benchmark")
     parser.add_argument("--verbose", action="store_true")

@@ -2,7 +2,7 @@
 
 **Đề tài:** Định vị lỗi phần mềm (Bug Localization) bằng hệ đa tác tử LLM kết hợp phân tích log và đồ thị mã nguồn
 **Loại tài liệu:** Thiết kế nghiên cứu (research design) — chi tiết cài đặt xem [ARCHITECTURE.md](../ARCHITECTURE.md)
-**Cập nhật:** 2026-07-05
+**Cập nhật:** 2026-07-09 (thêm E1/E2/E3 — §2.2 H6-H8, §3.4-3.6, §4.6, Giai đoạn B′, Phụ lục B)
 
 ---
 
@@ -63,6 +63,18 @@ Việc hợp nhất đa nguồn ứng viên (confirmed → navigation → stack 
 Chạy N=3 lượt với temperature 0.3 và hợp nhất bằng Reciprocal Rank Fusion cho MRR trung bình cao hơn và độ lệch chuẩn giữa các lần chạy thấp hơn so với 1 lượt greedy (temperature 0).
 *Bác bỏ nếu:* chi phí ×3 không đem lại cải thiện MRR có ý nghĩa.
 
+**H6 — Giả thuyết cạnh tranh + falsification tăng recall có lý do (E1).**
+Comprehension sinh K=3-5 giả thuyết cạnh tranh (mỗi cái nêu cơ chế, file nghi vấn, probe kiểm chứng — trong đó ≥1 probe DISCONFIRMING); VerificationAgent thu bằng chứng ủng hộ/bác bỏ; cập nhật belief bằng log-odds thuần Python. Pool ứng viên nhận thêm nguồn "file của giả thuyết sống theo posterior" → Top-5 coverage tăng so với 1 giả thuyết duy nhất, mạnh nhất trên bug **không có stack trace**; file của giả thuyết bị bác bỏ nhận điểm âm nên không kéo giảm Top-1.
+*Bác bỏ nếu:* Top-5 tăng < 3 điểm % trên dev set, hoặc Top-1 giảm > 2 điểm %.
+
+**H7 — Khám phá theo hàng đợi ưu tiên đạt hiệu quả bằng với chi phí thấp hơn (E2).**
+Thay vòng lặp tool-calling tự do của Navigation bằng scheduler ưu tiên (priority = 0.5×LLM-relevance + 0.3×graph-proximity + 0.2×static-prior) với context O(1) mỗi bước (không mang message history): Top-5 không kém free-form, token Phase-2 giảm ≥ 20%, phương sai tool-call giữa instance giảm, và lỗi `miss_empty` bất khả thi về cấu trúc (output lắp ráp bằng Python thuần).
+*Bác bỏ nếu:* Top-5 thấp hơn có ý nghĩa thống kê, hoặc token giảm < 10%.
+
+**H8 — Listwise rerank trên evidence card tăng Top-1 với Top-10 bất biến (E3).**
+Một LLM call cuối nhìn đồng thời top-10 ứng viên dưới dạng evidence card (cờ tín hiệu định tính từ UnifiedScorer + verdict của agent + snippet đã thu hẹp — KHÔNG lộ điểm tổng/thứ hạng, trình bày theo thứ tự shuffle deterministic) và hoán vị lại thứ tự → Top-1/MRR tăng trong khi Top-10/recall không đổi **theo cấu trúc** (chỉ hoán vị, không thay tập). Kiểm tra position bias dư bằng cấu hình 2 pass shuffle khác nhau + RRF.
+*Bác bỏ nếu:* Top-1 không tăng có ý nghĩa, hoặc số case bị giáng khỏi Top-1 ≥ số case được thăng.
+
 ---
 
 ## 3. Thiết kế hệ thống
@@ -120,6 +132,9 @@ Ranked files/methods + giải thích root cause
 | Unified scoring 9 tín hiệu | `evaluation/unified_scorer.py` | H4 | `ENABLE_UNIFIED_SCORING` |
 | Best-of-N + RRF | `orchestrator.multi_pass_localize` | H5 | `--passes 1` vs `3` |
 | Self-reflection | orchestrator loop | RQ2 | `REFLECTION_MAX_ROUNDS=0` |
+| Vòng giả thuyết cạnh tranh (E1) | `agents/hypothesis.py`, `agents/verification.py` | H6 | `ENABLE_HYPOTHESIS_LOOP` |
+| Khám phá hàng đợi ưu tiên (E2) | `core/explorer.py`, `agents/priority_navigation.py` | H7 | `ENABLE_PRIORITY_EXPLORATION` |
+| Thu hẹp phân cấp + listwise rerank (E3) | `evaluation/reranker.py` | H8 | `ENABLE_HIERARCHICAL_NARROWING`, `ENABLE_LISTWISE_RERANK` |
 
 ### 3.3 Quyết định thiết kế then chốt (và lý do)
 
@@ -128,6 +143,43 @@ Ranked files/methods + giải thích root cause
 3. **Danh sách cuối không bao giờ mỏng:** bài học từ baseline — mọi con đường thất bại (JSON parse hỏng, agent hết vòng lặp, confirmation từ chối) đều phải đổ về candidate pool có thứ bậc, kèm nguồn "path-keyword" thuần filesystem làm lưới an toàn cuối (không phụ thuộc LLM/index).
 4. **Xếp hạng bằng tín hiệu tường minh, không chỉ LLM confidence:** trọng số stack-trace cao nhất (2.5) phản ánh phát hiện thực nghiệm: khi có traceback, frame gần cuối gần như luôn là đáp án; LLM confidence chỉ là một trong 9 tín hiệu → giảm phụ thuộc vào tính bất định của model.
 5. **Mọi tính năng có công tắc env:** thiết kế phục vụ ablation (RQ2) ngay từ đầu, không phải gắn thêm sau.
+
+### 3.4 Vòng lặp giả thuyết cạnh tranh — E1 (H6)
+
+**Cơ chế.** Thay 1 `fault_hypothesis` duy nhất bằng K=3-5 giả thuyết cạnh tranh, mỗi cái là một **tuyên bố có thể bác bỏ** (nêu cơ chế, không nêu triệu chứng) kèm: component/file/function nghi vấn, chuỗi nhân quả, và các probe kiểm chứng — bắt buộc ≥1 probe DISCONFIRMING. LLM chỉ **đề xuất giả thuyết và dán nhãn bằng chứng**; toàn bộ số học belief là Python thuần (kiểm toán được, không phụ thuộc calibration của model):
+
+- `prior` → `log_odds = ln(p/(1-p))` clamp ±2.0; mỗi bằng chứng cập nhật `log_odds += direction × LLR` với LLR = 0.25/0.6/1.1 (weak/moderate/strong).
+- `posterior < 0.15` → **falsified**; `> 0.75` → supported; còn lại active.
+
+**Vị trí trong pipeline.** Sinh: mở rộng JSON schema của ComprehensionAgent (không thêm call). Kiểm chứng: `VerificationAgent` mới chạy **sau Navigation vòng 1, trước Confirmation** (6 iteration, tool: read_file/get_function_source/code_search/find_callers/find_callees), prompt bắt buộc tìm bằng chứng CHỐNG với nỗ lực ngang bằng chứng ỦNG HỘ. **Fast path:** bỏ qua kiểm chứng khi có stack-trace files và top prior ≥ 0.85 (bug giàu traceback không cần giả thuyết cạnh tranh — kiểm soát token).
+
+**Tích hợp điểm số.** (i) Pool: nguồn mới "file của giả thuyết sống theo posterior" chèn giữa confirmed và navigation; file bị bác bỏ KHÔNG bị xóa (bảo toàn recall) mà tụt hạng qua scoring. (ii) UnifiedScorer: tín hiệu thứ 10 `hypothesis_support` (×0.8), file chỉ thuộc giả thuyết falsified nhận **điểm âm** −0.4×w — cơ chế duy nhất giáng được ứng viên mà LLM tự tin sai. (iii) Reflection: `tracker.reflection_summary()` thay message generic — chỉ đích danh "HYP1 đã bác bỏ vì X; HYP3 còn 2 probe chưa kiểm — tập trung vào đó".
+
+**Fail-open.** JSON hỏng → bọc `fault_hypothesis` thành 1 giả thuyết duy nhất (đúng hành vi hiện tại); mọi giả thuyết bị bác bỏ → tín hiệu = 0 → xếp hạng như cũ. Contract: `fault_hypothesis` luôn = statement của giả thuyết top-prior nên downstream không đổi khi flag off/on.
+
+### 3.5 Khám phá theo hàng đợi ưu tiên — E2 (H7, kiểu OrcaLoca)
+
+**Quyết định kiến trúc: scheduler chọn action, LLM chỉ chấm điểm.** `PriorityNavigationAgent` thay vòng lặp tool-calling tự do bằng engine `core/explorer.py`: heap các action (`inspect_file/inspect_function/expand_callers/expand_callees/run_search`) với
+
+```
+priority = 0.5 × llm_relevance/10 + 0.3 × 1/(1 + graph_distance-tới-anchor) + 0.2 × static_prior
+```
+
+static_prior theo nguồn gốc: stack-trace 1.0 · mentioned/test-derived 0.7 · file giả thuyết 0.6×posterior (khi E1 bật) · path-keyword 0.4 · mặc định 0.2. Java giảm trọng số graph còn 0.15 (CPG regex nhiễu hơn AST).
+
+**Vòng lặp.** Decomposition (1 call; khi E1 bật thì mỗi giả thuyết sống = 1 sub-query, khỏi call) → pop-execute qua tool registry sẵn có → 1 call observe **context O(1)** (~2-3k token: output tool ≤6k ký tự + tên/điểm top findings; KHÔNG mang message history — đây chính là distance-aware context pruning) → relevance ≥6 thành suspicious location; observation cũng dán nhãn `hypothesis_evidence` feed ngược tracker E1 (nên khi E1+E2 cùng bật, orchestrator KHÔNG chạy VerificationAgent riêng). Dừng khi: 20 action / frontier rỗng / top priority < 0.15 / 5 lần liên tiếp relevance < 3 / ≥8 finding relevance ≥ 8.
+
+**Hệ quả cấu trúc.** Output lắp ráp bằng Python thuần (không parse JSON tổng) ⇒ lớp lỗi `miss_empty` bất khả thi ở Phase 2; token phẳng có trần cứng (~20 × 2.5k) thay vì tăng dần theo history. Visited-set persist qua reflection round (không lặp lại việc cũ). Lưới an toàn: `EXPLORATION_FALLBACK_TO_FREEFORM` chạy NavigationAgent thường nếu explorer tìm được <3 location relevance ≥5. Schema output y hệt Navigation nên Confirmation/pool/scorer không đổi. API graph mới: `GraphRetriever.find_anchor_nodes` + `hop_distance`/`file_hop_distances` (BFS + cache; graph chưa sẵn sàng → khoảng cách trung tính).
+
+### 3.6 Thu hẹp phân cấp + Listwise rerank — E3 (H8, kiểu Agentless)
+
+**Vị trí hook:** `evaluation/reranker.py::ListwiseReranker`, gọi ngay sau `_apply_unified_scoring` (và nhánh fallback pool). **Chỉ hoán vị top-K=10, không bao giờ thay tập** ⇒ Top-10/recall bất biến theo cấu trúc, cô lập H8 vào Top-1/MRR; mọi failure = no-op.
+
+**Stage (a) — thu hẹp phân cấp** (`ENABLE_HIERARCHICAL_NARROWING`): 1 call structured trên skeleton của cả top-10 (`tools/repo_skeleton.py::skeleton_for_files`) → mỗi file ≤2 hàm nghi + line range; điền `ranked_methods`/`function_name/start_line/end_line` cho file pool chưa có method (cải thiện luôn metric method-level) và cắt snippet ≤15 dòng cho stage (b).
+
+**Stage (b) — listwise rerank** (`ENABLE_LISTWISE_RERANK`): 1 call temp 0, không tool, trên **evidence card** lắp bằng Python: cờ tín hiệu định tính từ `CandidateScore` (STACK_TRACE/ERROR_MATCH/graph/semantic/recency), verdict + confidence của agent (file pad ghi rõ "verdict: none"), snippet đã thu hẹp. **Chống position bias:** ID trung tính C1..CK, thứ tự shuffle deterministic theo SHA-256(instance_id) — tái lập được nhưng khử tương quan với thứ hạng unified; không lộ điểm tổng/rank; tùy chọn 2 pass shuffle khác + RRF làm ablation đo bias. **Validate:** output phải là hoán vị (thiếu ID → nối lại theo thứ tự unified; không parse được → giữ nguyên). Card serialize được vào `agent_results["listwise_rerank"]` ⇒ replay offline để iterate prompt không cần chạy lại agent.
+
+**Luận điểm compositional:** đứng riêng E3 chỉ có headroom nhỏ (baseline có Top-3 = Top-5); giá trị chính là E1/E2 nâng recall làm đầy bucket hit@2-10, rồi E3 chuyển thành Top-1 — do đó thứ tự triển khai là E3 → E1 → E2 nhưng thứ tự **đánh giá** phải có cấu hình bật cả ba.
 
 ---
 
@@ -170,12 +222,29 @@ Mỗi dòng tắt một thành phần so với cấu hình đầy đủ, chạy 
 | −Pool padding | `MIN_RANKED_FILES=0` |
 | −Reflection | `REFLECTION_MAX_ROUNDS=0` |
 | +BestOf3 | passes=3, temp 0.3 |
+| +HypLoop (E1) | `ENABLE_HYPOTHESIS_LOOP=true` |
+| +PriorityExp (E2) | `ENABLE_PRIORITY_EXPLORATION=true` |
+| +Rerank only (E3b) | `ENABLE_LISTWISE_RERANK=true` |
+| +Narrow+Rerank (E3) | cả hai flag E3 |
+| +Rerank 2-pass | `LISTWISE_RERANK_PASSES=2` (đo position bias dư) |
+| +HypLoop+Rerank | E1 + E3 (recall → precision) |
+| +PriorityExp+Rerank | E2 + E3 (bù so sánh chéo ứng viên mà explorer thiếu) |
+| PriorityExp −graph | E2 với `EXPLORATION_W_GRAPH=0` (tách "priority" khỏi "context pruning") |
+| Full+E1+E2+E3 | cả ba bật |
 
 ### 4.5 Tái lập (reproducibility)
 
 - Toàn bộ cấu hình qua `.env` (đã version mẫu trong `.env.example`); model, provider, temperature ghi vào metadata của mỗi file kết quả JSON.
 - Checkout benchmark cố định theo commit (scripts/checkout_*).
 - Kết quả thô (per-instance JSON/CSV) commit vào `results/` để người khác kiểm chứng lại metrics mà không cần chạy lại LLM.
+
+### 4.6 Thí nghiệm khả thi FE-1/2/3 (gate đăng ký trước, chạy trước ablation đầy đủ)
+
+Mỗi extension phải qua gate rẻ (<20 instance) trước khi đầu tư chạy ma trận đầy đủ:
+
+- **FE-1 (E1, ~15 instance, chỉ cần Comprehension):** 10 case `miss_gt_absent` + 5 case hit từ baseline 50; đo *hypothesis coverage* = % instance có ground-truth file ∈ ∪suspected_files của K=4 giả thuyết, và *distinctness* = số component khác nhau trung bình. **Gate: coverage ≥ 40% trên nhóm miss (hiện ≈0% theo định nghĩa) và distinctness ≥ 3.**
+- **FE-2 (E2, 16 instance stratified 8 giàu/8 nghèo stack-trace):** baseline vs `ENABLE_PRIORITY_EXPLORATION=true`; đo recall của suspicious_locations, token Phase-2, số tool call, wall time. **Gate: recall không tệ hơn (paired) và token Phase-2 ≤ mean baseline.**
+- **FE-3 (E3, 20 instance, 1 lượt chạy):** log thứ tự trước/sau rerank (đã stash trong `agent_results["listwise_rerank"]`); đo `gained_top1`/`lost_top1`, Kendall-τ với thứ tự unified, tỉ lệ permutation hợp lệ. **Gate: net Top-1 ≥ +2/20, validity ≥ 90%, lost < gained.** Card đã serialize nên prompt rerank có thể iterate offline không tốn lượt agent.
 
 ---
 
@@ -217,9 +286,17 @@ Mỗi dòng tắt một thành phần so với cấu hình đầy đủ, chạy 
 
 ### Giai đoạn B — Nâng precision Top-1 (2-4 tuần)
 
-- [ ] **Listwise rerank:** 1 LLM call cuối nhận top-10 + snippet, xếp lại thứ tự (nhắm nhóm hit@2-3).
+- [x] **Listwise rerank (E3, §3.6):** đã cài đặt `evaluation/reranker.py` (narrowing + rerank, 2026-07-09) — chờ FE-3.
 - [ ] **Tune trọng số scorer theo profile benchmark:** django ít stack trace → tăng mentioned/semantic; grid search trên dev set, giữ profile Java/Python riêng.
 - [ ] **Log tổng hợp cho bug không log (gắn H3):** ComprehensionAgent sinh "log giả định" (exception message khả dĩ) làm query tìm kiếm — đo riêng trên tầng bug không log.
+
+### Giai đoạn B′ — Vòng đột phá E1/E2/E3 (đã cài đặt 2026-07-09, nhánh feat/improve)
+
+- [x] E3: `evaluation/reranker.py` + `skeleton_for_files` + hook orchestrator + 19 unit test.
+- [x] E1: `agents/hypothesis.py` (tracker log-odds) + `agents/verification.py` + schema hypotheses trong Comprehension + tín hiệu thứ 10 UnifiedScorer + reflection có đích + 20 unit test.
+- [x] E2: `core/explorer.py` (frontier/termination) + `agents/priority_navigation.py` + `find_anchor_nodes`/`hop_distance` trong GraphRetriever + 19 unit test.
+- [ ] Chạy FE-1/2/3 theo gate §4.6 (cần API + checkouts).
+- [ ] Nếu qua gate: đưa các dòng E1/E2/E3 vào ma trận ablation Giai đoạn C.
 
 ### Giai đoạn C — Thí nghiệm luận văn (4-8 tuần)
 
@@ -247,6 +324,9 @@ Mỗi dòng tắt một thành phần so với cấu hình đầy đủ, chạy 
 | External | 2 ngôn ngữ, 10 dự án — chưa chắc tổng quát cho công nghiệp | Nêu rõ giới hạn; BugsInPy bổ sung đa dạng |
 | Stochastic | Kết quả LLM dao động giữa các lần chạy | temperature 0 cho main runs; 3 seeds cho cấu hình ngẫu nhiên; kiểm định theo cặp |
 | Chi phí | API bị rate-limit/đổi giá làm gián đoạn thí nghiệm | Cache kết quả per-instance, resume được; hỗ trợ đa provider |
+| Construct (E1) | Nhãn bằng chứng (direction/strength) do LLM tự dán — chủ quan | Số học belief deterministic + LLR nhỏ (1 nhãn không lật trạng thái); log toàn bộ evidence để audit |
+| Construct (E2) | Gain của E2 có thể đến từ context pruning chứ không phải priority | Sub-ablation `EXPLORATION_W_GRAPH=0` (giữ pruning, tắt tín hiệu graph) tách hai cơ chế |
+| Internal (E3) | Rerank có thể học position bias từ thứ tự trình bày | Shuffle deterministic + không lộ rank/điểm tổng + cấu hình 2-pass RRF đo bias dư |
 
 ---
 
@@ -262,3 +342,23 @@ Mỗi dòng tắt một thành phần so với cấu hình đầy đủ, chạy 
 | `SCORE_WEIGHT_*` | xem `.env.example` | Giai đoạn B tuning |
 | `LLM_PROVIDER` / `LLM_MODEL` | theo `.env` | cross-model (Giai đoạn D) |
 | `PER_BUG_TIMEOUT` / `LLM_CALL_TIMEOUT` | 300 / 120 giây | ổn định eval |
+| `ENABLE_HYPOTHESIS_LOOP` | false | H6, E1 |
+| `HYPOTHESIS_K` / `HYPOTHESIS_VERIFY_MAX_ITER` | 4 / 6 | E1 budget |
+| `HYPOTHESIS_FALSIFY_THRESHOLD` / `HYPOTHESIS_FASTPATH_PRIOR` | 0.15 / 0.85 | E1 ngưỡng |
+| `SCORE_WEIGHT_HYPOTHESIS` | 0.8 | E1 tín hiệu scorer |
+| `ENABLE_PRIORITY_EXPLORATION` | false | H7, E2 |
+| `EXPLORATION_MAX_ACTIONS` / `EXPLORATION_MAX_DEPTH` | 20 / 4 | E2 budget |
+| `EXPLORATION_W_LLM` / `_W_GRAPH` / `_W_SIGNAL` / `_W_GRAPH_JAVA` | 0.5/0.3/0.2/0.15 | E2 priority; `_W_GRAPH=0` cho sub-ablation |
+| `EXPLORATION_MIN_PRIORITY` / `EXPLORATION_FALLBACK_TO_FREEFORM` | 0.15 / true | E2 dừng/lưới an toàn |
+| `ENABLE_HIERARCHICAL_NARROWING` / `ENABLE_LISTWISE_RERANK` | false / false | H8, E3 |
+| `LISTWISE_RERANK_TOP_K` / `LISTWISE_RERANK_PASSES` | 10 / 1 | E3; passes=2 đo bias |
+
+---
+
+## Phụ lục B — Tín hiệu spectrum/test-execution (E4, nghiên cứu khả thi — future work)
+
+Tín hiệu mạnh nhất trong văn liệu FL nhưng cần hạ tầng docker; phác thảo để Giai đoạn D cân nhắc:
+
+- **Precompute offline** (`scripts/precompute_spectrum.py`, pattern như `prebuild_graphs.py`): kéo docker image chính thức per-instance của SWE-bench, chạy các test `FAIL_TO_PASS` tại buggy commit dưới `coverage.py --branch` + các test `PASS_TO_PASS` cùng module làm contrast → `data/spectrum/<instance_id>.json` với execution count per-file/per-line và Ochiai suspiciousness (degrade về tần suất "được test fail chạm tới" khi thiếu coverage của test pass).
+- **Consume online:** trọng số mới `SCORE_WEIGHT_SPECTRUM` ≈ 1.5-2.0 trong UnifiedScorer (tín hiệu động lịch sử luôn trội tín hiệu tĩnh); đồng thời làm `static_prior` cho E2 và một dòng evidence card cho E3 ("executed by failing test: yes, 14 hits").
+- **Effort:** ~2-3 tuần (docker plumbing + quirks test-runner per-repo), ~5-10 phút/instance, ~1-2 GB/image family. Chỉ SWE-bench (Defects4J cần harness riêng — ngoài phạm vi). **Spike trước:** chạy tay 5 instance xác nhận image chạy được `FAIL_TO_PASS` dưới coverage mà không phải vá test config.

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -64,6 +65,19 @@ class AgentContext:
     fault_hypothesis: str = ""
     candidate_files: list = field(default_factory=list)
     candidate_methods: list = field(default_factory=list)
+    # Structured navigation output (file_path/function/line-range/score/reason
+    # dicts) — evidence for Confirmation's single-shot path
+    suspicious_locations: list = field(default_factory=list)
+    # Snapshot of candidate_files right after comprehension (later phases
+    # mutate candidate_files) — one of the RRF stage rankings
+    comprehension_candidates: list = field(default_factory=list)
+    # True when navigation used the free-form tool loop (its line ranges are
+    # less reliable than the explorer's scored observations)
+    navigation_was_freeform: bool = False
+    # Transient payload for hybrid confirmation's verify stage — carried on
+    # the per-instance context because agent objects are shared across
+    # benchmark worker threads
+    _verify_stage_message: str | None = None
     repo_skeleton: str = ""
     reflection_feedback: str = ""
     # Agent trace / memory
@@ -96,6 +110,12 @@ class AgentContext:
 
     # Structured bug info extracted by ComprehensionAgent pre-step (BugCerberus-style)
     structured_bug_info: dict = field(default_factory=dict)
+
+    # E1: competing hypotheses (agents.hypothesis.Hypothesis) + their tracker.
+    # Contract: fault_hypothesis always holds the top hypothesis's statement,
+    # so downstream consumers work identically with the flag off or on.
+    hypotheses: list = field(default_factory=list)
+    hypothesis_tracker: Any = None
 
     def add_trace(self, agent_name: str, action: str, result: str):
         """Add an entry to the agent trace."""
@@ -142,16 +162,18 @@ class BaseAgent(ABC):
                     _shared_clients[provider] = OpenAI(
                         api_key=config.llm.gemini_api_key,
                         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                        max_retries=config.llm_max_retries,
                     )
                     logger.info(f"Using Gemini provider (model={config.llm.model})")
                 elif provider == "openai":
-                    kwargs = {"api_key": config.llm.api_key}
+                    kwargs = {"api_key": config.llm.api_key, "max_retries": config.llm_max_retries}
                     if config.llm.api_base:
                         kwargs["base_url"] = config.llm.api_base
                     _shared_clients[provider] = OpenAI(**kwargs)
                     logger.info(f"Using OpenAI provider (model={config.llm.model})")
                 else:
-                    kwargs = {"api_key": config.llm.api_key or "no-key"}
+                    kwargs = {"api_key": config.llm.api_key or "no-key",
+                              "max_retries": config.llm_max_retries}
                     if config.llm.api_base:
                         kwargs["base_url"] = config.llm.api_base
                     _shared_clients[provider] = OpenAI(**kwargs)
@@ -429,7 +451,31 @@ class BaseAgent(ABC):
             kwargs["tool_choice"] = "auto"
 
         call_timeout = config.llm_call_timeout if config.llm_call_timeout > 0 else None
-        return self.client.chat.completions.create(**kwargs, timeout=call_timeout)
+        # Application-level retry with exponential backoff for transient
+        # network faults (connection resets, mid-stream timeouts) that the
+        # SDK's built-in max_retries doesn't always catch. A failed call
+        # inside an agent loop otherwise forces a degraded forced-answer.
+        last_exc = None
+        for attempt in range(config.llm_call_retries):
+            try:
+                return self.client.chat.completions.create(
+                    **kwargs, timeout=call_timeout
+                )
+            except Exception as e:
+                last_exc = e
+                msg = str(e).lower()
+                # Non-retryable: 4xx auth/content errors — bail immediately
+                if any(s in msg for s in ("401", "403", "invalid_api_key")):
+                    raise
+                if attempt < config.llm_call_retries - 1:
+                    backoff = config.llm_retry_base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"[{self.name}] LLM call failed (attempt {attempt+1}/"
+                        f"{config.llm_call_retries}): {type(e).__name__}: {str(e)[:120]} "
+                        f"— retrying in {backoff:.1f}s"
+                    )
+                    time.sleep(backoff)
+        raise last_exc
 
     def _execute_tool(
         self,

@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --surface-1: #fcfcfb;
+    --surface-2: #f5f4f1;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #83817a;
+    --border: #e2e0da;
+    --blue: #2a78d6;
+    --blue-bg: #eaf1fb;
+    --yellow: #eda100;
+    --yellow-bg: #fdf3e0;
+    --green: #008300;
+    --row-alt: #f8f7f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 40px;
+    background: var(--surface-1);
+    font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--text-primary);
+  }
+  .wrap { width: 1180px; margin: 0 auto; }
+  h1 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 0 0 4px 0;
+    letter-spacing: -0.01em;
+  }
+  .subtitle {
+    font-size: 13.5px;
+    color: var(--text-secondary);
+    margin: 0 0 20px 0;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    font-size: 14px;
+  }
+  thead th {
+    background: var(--surface-2);
+    text-align: left;
+    padding: 12px 14px;
+    font-weight: 600;
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+  }
+  thead th.num { text-align: center; }
+  tbody td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  td.num { text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+  td.sys { font-weight: 600; }
+  td.backbone { color: var(--text-secondary); }
+  td.src { color: var(--text-muted); font-size: 12px; }
+  .row-highlight { background: var(--blue-bg) !important; }
+  .row-projected { background: var(--yellow-bg) !important; }
+  .badge {
+    display: inline-block;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 2px 7px;
+    border-radius: 999px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .badge-measured {
+    background: #e6f4ea;
+    color: var(--green);
+  }
+  .badge-projected {
+    background: #fdf0d5;
+    color: #a66a00;
+  }
+  .badge-current {
+    background: var(--blue);
+    color: #fff;
+  }
+  .legend {
+    display: flex;
+    gap: 22px;
+    margin-top: 16px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+  }
+  .legend-item { display: flex; align-items: center; gap: 7px; }
+  .dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .dot-measured { background: #e6f4ea; border: 1px solid #b7ddc3; }
+  .dot-projected { background: var(--yellow-bg); border: 1px solid #f0d190; }
+  .dot-current { background: var(--blue-bg); border: 1px solid #b9d3f2; }
+  .footnote {
+    margin-top: 14px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.55;
+    max-width: 980px;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>So sánh File-level Localization Accuracy — SWE-bench Lite</h1>
+    <p class="subtitle">LocAgent · OrcaLoca · Source base hiện tại — theo backbone LLM</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width:26%">Hệ thống</th>
+          <th style="width:22%">Backbone</th>
+          <th class="num" style="width:14%">Top-1 (Acc@1)</th>
+          <th class="num" style="width:14%">Top-3 (Acc@3)</th>
+          <th class="num" style="width:14%">Top-5 (Acc@5)</th>
+          <th style="width:10%">Nguồn</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="sys">LocAgent</td>
+          <td class="backbone">Claude-3.5-Sonnet</td>
+          <td class="num">77.74%</td>
+          <td class="num">91.97%</td>
+          <td class="num">94.16%</td>
+          <td class="src">arXiv:2503.09089</td>
+        </tr>
+        <tr>
+          <td class="sys">LocAgent</td>
+          <td class="backbone">Qwen2.5-32B (ft)</td>
+          <td class="num">75.91%</td>
+          <td class="num">90.51%</td>
+          <td class="num">92.70%</td>
+          <td class="src">arXiv:2503.09089</td>
+        </tr>
+        <tr>
+          <td class="sys">LocAgent</td>
+          <td class="backbone">Qwen2.5-7B (ft) <span class="badge badge-measured">ĐO THẬT</span></td>
+          <td class="num">70.80%</td>
+          <td class="num">84.67%</td>
+          <td class="num">88.32%</td>
+          <td class="src">arXiv:2503.09089</td>
+        </tr>
+        <tr>
+          <td class="sys">OrcaLoca</td>
+          <td class="backbone">Claude-3.5-Sonnet</td>
+          <td class="num">83.33%¹</td>
+          <td class="num">—</td>
+          <td class="num">—</td>
+          <td class="src">arXiv:2502.00350</td>
+        </tr>
+        <tr class="row-projected">
+          <td class="sys">OrcaLoca</td>
+          <td class="backbone">Qwen2.5-7B <span class="badge badge-projected">DỰ KIẾN</span></td>
+          <td class="num">74.0%</td>
+          <td class="num">87.0%</td>
+          <td class="num">90.0%</td>
+          <td class="src">Suy luận §2</td>
+        </tr>
+        <tr>
+          <td class="sys">Agentless</td>
+          <td class="backbone">Claude-3.5-Sonnet</td>
+          <td class="num">72.63%</td>
+          <td class="num">79.20%</td>
+          <td class="num">79.56%</td>
+          <td class="src">arXiv:2503.09089</td>
+        </tr>
+        <tr class="row-highlight">
+          <td class="sys">Source base hiện tại <span class="badge badge-current">CỦA TA</span></td>
+          <td class="backbone">qwen-plus (zero-shot) <span class="badge badge-measured">ĐO THẬT</span></td>
+          <td class="num">78.0%</td>
+          <td class="num">87.3%</td>
+          <td class="num">89.3%</td>
+          <td class="src">n=300, đo thật</td>
+        </tr>
+        <tr class="row-highlight row-projected">
+          <td class="sys">Source base hiện tại <span class="badge badge-current">CỦA TA</span></td>
+          <td class="backbone">Qwen2.5-7B (zero-shot) <span class="badge badge-projected">DỰ KIẾN</span></td>
+          <td class="num">53.0%</td>
+          <td class="num">70.0%</td>
+          <td class="num">76.0%</td>
+          <td class="src">Suy luận §3</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="legend">
+      <div class="legend-item"><span class="dot dot-measured"></span>Số đo thật (trích bài báo hoặc thực nghiệm nội bộ)</div>
+      <div class="legend-item"><span class="dot dot-projected"></span>Số dự kiến — chưa chạy thực nghiệm, xem phương pháp suy luận §2–3</div>
+      <div class="legend-item"><span class="dot dot-current"></span>Source base hiện tại (dự án này)</div>
+    </div>
+
+    <p class="footnote">
+      ¹ OrcaLoca báo cáo "File Match Rate" — có thể không hoàn toàn cùng định nghĩa với Acc@1 của LocAgent. Function Match Rate của OrcaLoca (65.33%) không so trực tiếp được với File Acc@1.
+      Các hàng "Dự kiến" được suy từ tỉ lệ suy giảm Claude→Qwen2.5-7B đo được trên LocAgent, áp lên số Claude tương ứng và khấu trừ cho zero-shot/độ dài vòng lặp — xem chi tiết phương pháp trong docs/QWEN7B_PROJECTION.md.
+    </p>
+  </div>
+</body>
+</html>

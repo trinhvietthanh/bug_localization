@@ -407,6 +407,7 @@ class GraphRetriever:
     def _prepare_indexes(self):
         """Prepare lexical index for faster anchor candidate lookup."""
         self._name_token_index.clear()
+        self._file_node_index = None
         if self.graph is None:
             return
         for node in self.graph.all_nodes():
@@ -419,3 +420,113 @@ class GraphRetriever:
             )
             for token in tokens:
                 self._name_token_index.setdefault(token, set()).add(node.id)
+
+    # ─── E2 public API: anchors + hop distances for priority exploration ───
+
+    def find_anchor_nodes(self, query: str, top_k: int = 5) -> list[tuple[GraphNode, float]]:
+        """Public wrapper over anchor matching (E2 priority exploration)."""
+        if self.graph is None:
+            return []
+        return self._find_anchors(query)[:top_k]
+
+    def _get_file_node_index(self) -> dict[str, list[str]]:
+        """Lazy file_path → [node_id] index (normalized relative paths)."""
+        if getattr(self, "_file_node_index", None) is None:
+            index: dict[str, list[str]] = {}
+            if self.graph is not None:
+                for node in self.graph.all_nodes():
+                    fp = (node.file_path or "").replace("\\", "/").lstrip("/")
+                    if fp:
+                        index.setdefault(fp, []).append(node.id)
+            self._file_node_index = index
+        return self._file_node_index
+
+    def _nodes_for_file(self, file_path: str, cap: int = 10) -> list[str]:
+        """Node ids in a file; tolerates suffix/prefix path mismatches."""
+        fp = (file_path or "").replace("\\", "/").lstrip("/")
+        if not fp:
+            return []
+        index = self._get_file_node_index()
+        if fp in index:
+            return index[fp][:cap]
+        for key, ids in index.items():
+            if key.endswith("/" + fp) or fp.endswith("/" + key):
+                return ids[:cap]
+        return []
+
+    def file_hop_distances(
+        self, seed_files: list[str], max_hops: int = 4
+    ) -> dict[str, int]:
+        """
+        Multi-source BFS from every node of the seed files, returning the
+        minimum hop distance per reachable file. Files not reached within
+        max_hops are absent (callers should treat missing as max_hops + 1).
+        Used by the E2 explorer to score actions by proximity to anchors.
+        """
+        if self.graph is None:
+            return {}
+        distances: dict[str, int] = {}
+
+        def _norm(fp: str) -> str:
+            return (fp or "").replace("\\", "/").lstrip("/")
+
+        seed_ids: list[str] = []
+        for fp in seed_files or []:
+            nfp = _norm(fp)
+            if nfp:
+                distances[nfp] = 0
+                seed_ids.extend(self._nodes_for_file(nfp))
+
+        for nid in seed_ids:
+            try:
+                for node, depth, _edge in self.graph.get_neighbors(nid, max_depth=max_hops):
+                    nfp = _norm(node.file_path)
+                    if not nfp:
+                        continue
+                    if depth < distances.get(nfp, max_hops + 1):
+                        distances[nfp] = depth
+            except Exception as e:
+                logger.debug(f"[GraphRetriever] neighbor BFS failed for {nid}: {e}")
+        return distances
+
+    def hop_distance(self, file_a: str, file_b: str, max_hops: int = 4) -> int:
+        """
+        Minimum hop distance between any node of file_a and any node of
+        file_b (BFS over call/containment/import edges). Returns
+        ``max_hops + 1`` when unreachable or when the graph is unavailable —
+        a neutral value so priority scoring degrades gracefully.
+        """
+        if self.graph is None:
+            return max_hops + 1
+        cache = getattr(self, "_hop_distance_cache", None)
+        if cache is None:
+            cache = self._hop_distance_cache = OrderedDict()
+        key = (file_a, file_b, max_hops)
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+
+        def _norm(fp: str) -> str:
+            return (fp or "").replace("\\", "/").lstrip("/")
+
+        result = max_hops + 1
+        if _norm(file_a) == _norm(file_b):
+            result = 0
+        else:
+            target_ids = set(self._nodes_for_file(file_b, cap=50))
+            target_fp = _norm(file_b)
+            for nid in self._nodes_for_file(file_a):
+                try:
+                    for node, depth, _edge in self.graph.get_neighbors(nid, max_depth=max_hops):
+                        if node.id in target_ids or _norm(node.file_path) == target_fp:
+                            result = min(result, depth)
+                            break
+                except Exception:
+                    continue
+                if result <= 1:
+                    break
+
+        if len(cache) >= 2048:
+            cache.popitem(last=False)
+        cache[key] = result
+        return result

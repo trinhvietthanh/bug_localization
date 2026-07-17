@@ -132,6 +132,17 @@ class NavigationAgent(BaseAgent):
             "",
         ]
 
+        # E1: expose the full competing-hypothesis set so navigation can
+        # cover all suspected components, not just the top hypothesis
+        if context.hypotheses:
+            parts.append("## Competing Hypotheses (explore ALL suspected areas)")
+            for h in context.hypotheses:
+                files = ", ".join(h.suspected_files[:3]) or "no files listed"
+                parts.append(
+                    f"- {h.hid} (prior {h.prior:.2f}): {h.statement} → {files}"
+                )
+            parts.append("")
+
         if context.test_derived_candidates:
             parts.append("## Test-Derived Candidate Files (HIGH PRIORITY)\n")
             parts.append(

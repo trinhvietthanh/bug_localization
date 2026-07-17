@@ -51,6 +51,35 @@ def generate_repo_skeleton(
     return "\n".join(lines)
 
 
+def skeleton_for_files(
+    repo_path: str,
+    files: list[str],
+    language: str,
+    max_entries_per_file: int = 10,
+) -> dict[str, str]:
+    """
+    Compact per-file skeletons for a specific file list (not a repo walk).
+
+    Returns {relative_path: "Class(m1,m2), function_a, ..."}; files that are
+    missing or unparsable map to an empty string so callers can degrade.
+    """
+    root = Path(repo_path)
+    is_java = language.lower() == "java"
+    skeletons: dict[str, str] = {}
+    for rel in files:
+        file_path = root / rel
+        if not file_path.is_file():
+            skeletons[rel] = ""
+            continue
+        entries = (
+            _extract_java_entries(file_path)
+            if is_java
+            else _extract_python_entries(file_path)
+        )
+        skeletons[rel] = ", ".join(entries[:max_entries_per_file])
+    return skeletons
+
+
 def _extract_python_entries(file_path: Path) -> list[str]:
     try:
         source = file_path.read_text(encoding="utf-8", errors="ignore")

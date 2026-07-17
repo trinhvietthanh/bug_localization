@@ -91,8 +91,18 @@ class Orchestrator:
 
         # Initialize agents
         self.comprehension_agent = ComprehensionAgent()
-        self.navigation_agent = NavigationAgent()
+        if config.enable_priority_exploration:
+            from agents.priority_navigation import PriorityNavigationAgent
+
+            self.navigation_agent = PriorityNavigationAgent()
+        else:
+            self.navigation_agent = NavigationAgent()
         self.confirmation_agent = ConfirmationAgent()
+        self.verification_agent = None
+        if config.enable_hypothesis_loop:
+            from agents.verification import VerificationAgent
+
+            self.verification_agent = VerificationAgent()
 
     def localize(
         self,
@@ -282,6 +292,8 @@ class Orchestrator:
                     if f not in promoted:
                         promoted.append(f)
                 context.candidate_files = promoted
+            # Snapshot for RRF consensus — later phases mutate candidate_files
+            context.comprehension_candidates = list(context.candidate_files)
             if verbose:
                 console.print(f"  ✅ Hypothesis: {context.fault_hypothesis[:200]}")
                 console.print(f"  📂 Candidate files: {context.candidate_files}")
@@ -355,6 +367,10 @@ class Orchestrator:
                 if verbose:
                     console.print(f"  ❌ Failed: {nav_result.error}")
 
+            # E1: verify competing hypotheses once, before the first Confirmation
+            if round_idx == 0:
+                self._run_verification_stage(result, context, verbose)
+
             if verbose:
                 console.print(
                     f"  Candidate Files before validation: {context.candidate_files}"
@@ -382,7 +398,12 @@ class Orchestrator:
             top_conf = self._top_confidence(conf_result)
             if top_conf >= rct or round_idx == rounds - 1:
                 break
-            context.reflection_feedback = (
+            # E1: targeted reflection from hypothesis verdicts beats the
+            # generic "search more broadly" message when a tracker exists
+            hyp_summary = ""
+            if config.enable_hypothesis_loop and context.hypothesis_tracker is not None:
+                hyp_summary = context.hypothesis_tracker.reflection_summary()
+            context.reflection_feedback = hyp_summary or (
                 self.confirmation_agent.get_reflection_message(
                     conf_result,
                     confidence_threshold=rct,
@@ -457,16 +478,24 @@ class Orchestrator:
                     result, context, processed, verbose
                 )
 
+            self._maybe_rerank(result, context, verbose)
+
             if verbose:
                 self._print_results(result)
         else:
             result.ranked_files = self._build_candidate_pool(result, context)
             result.success = bool(result.ranked_files)
+            self._maybe_rerank(result, context, verbose)
             if verbose and conf_result is not None:
                 console.print(f"  ❌ Confirmation failed: {conf_result.error}")
                 console.print(
                     f"  ⚠️  Falling back to candidate pool: {result.ranked_files[:10]}"
                 )
+
+        # H1: patch-grounded duel between the final #1 and #2 (runs after
+        # every other ranking stage so its decision is final)
+        if config.enable_patch_duel:
+            self._run_patch_duel(result, context, verbose)
 
         # Filter out file paths that do not exist in the checked-out repo
         result.ranked_files = self._filter_nonexistent_files(
@@ -627,6 +656,11 @@ class Orchestrator:
 
         for loc in result.ranked_locations or []:
             _add(loc.get("file_path", ""))
+        # E1: files of surviving hypotheses, highest posterior first — a
+        # reasoned recall source ranked above generic navigation candidates
+        if context.hypothesis_tracker is not None:
+            for fp in context.hypothesis_tracker.surviving_files_ordered():
+                _add(fp)
         for fp in context.candidate_files or []:
             _add(fp)
         for fp in context.stack_trace_files or []:
@@ -821,7 +855,147 @@ class Orchestrator:
             logger.info(
                 f"[FileValidation] Dropped {dropped} non-existent path(s) from ranked_files"
             )
+        # Never return an empty prediction: unresolved paths still carry rank
+        # signal (an unvalidated guess scores infinitely better than nothing —
+        # cost the run sphinx-11445/10325/8273 on the 300-run)
+        if not valid and ranked_files:
+            logger.warning(
+                "[FileValidation] All paths dropped — keeping originals unvalidated"
+            )
+            return list(dict.fromkeys(ranked_files))
         return valid
+
+    def _run_patch_duel(
+        self, result: LocalizationResult, context: AgentContext, verbose: bool = False
+    ) -> None:
+        """H1: one call drafting a concrete patch for each of the top-2 files
+        and swapping them when the evidence favors #2. Fail-open: any error
+        keeps the existing order."""
+        files = result.ranked_files
+        if len(files) < 2 or files[0] == files[1]:
+            return
+        loc_map: dict[str, dict] = {}
+        for loc in result.ranked_locations or []:
+            fp = loc.get("file_path", "")
+            if fp and fp not in loc_map:
+                loc_map[fp] = loc
+
+        winner, usage = self.confirmation_agent.patch_duel(
+            context, files[0], files[1], loc_map
+        )
+        result.total_llm_calls += usage["llm_calls"]
+        result.total_prompt_tokens += usage["prompt_tokens"]
+        result.total_completion_tokens += usage["completion_tokens"]
+        result.total_tokens += usage["total_tokens"]
+
+        swapped = winner == files[1]
+        if swapped:
+            result.ranked_files = [files[1], files[0]] + files[2:]
+            # Mirror the swap in ranked_locations so downstream consumers agree
+            locs = result.ranked_locations or []
+            i1 = next((i for i, l in enumerate(locs)
+                       if l.get("file_path") == files[0]), None)
+            i2 = next((i for i, l in enumerate(locs)
+                       if l.get("file_path") == files[1]), None)
+            if i1 is not None and i2 is not None:
+                locs[i1], locs[i2] = locs[i2], locs[i1]
+                for rank, loc in enumerate(locs, 1):
+                    loc["rank"] = rank
+        result.agent_results["patch_duel"] = {
+            "winner": winner,
+            "swapped": swapped,
+            "llm_calls": usage["llm_calls"],
+        }
+        logger.info(
+            f"[PatchDuel] {'SWAPPED — new #1: ' + result.ranked_files[0] if swapped else 'kept #1: ' + files[0]}"
+        )
+        if verbose:
+            console.print(
+                f"  ⚔️  Patch duel: {'swapped → ' + result.ranked_files[0] if swapped else 'kept ' + files[0]}"
+            )
+
+    def _run_verification_stage(
+        self, result: LocalizationResult, context: AgentContext, verbose: bool = False
+    ) -> None:
+        """
+        E1 hook: run the VerificationAgent over competing hypotheses.
+
+        Skipped when the flag is off, no tracker exists, or the fast path
+        applies (stack-trace-rich bug with a confident top hypothesis — those
+        don't need competing hypotheses; keeps the token cost bounded).
+        Fail open: a failed verification leaves posteriors at their priors.
+        """
+        if self.verification_agent is None or context.hypothesis_tracker is None:
+            return
+        # E2 guard: when priority exploration is on, hypothesis probes are
+        # verified inside the explorer loop instead of a separate agent run.
+        if getattr(config, "enable_priority_exploration", False):
+            return
+        tracker = context.hypothesis_tracker
+        if context.stack_trace_files and tracker.top_prior() >= config.hypothesis_fastpath_prior:
+            if verbose:
+                console.print(
+                    "  ⏩ Hypothesis verification skipped (stack-trace fast path, "
+                    f"top prior {tracker.top_prior():.2f})"
+                )
+            return
+
+        if verbose:
+            console.print("\n[bold cyan]Phase 2.5: Hypothesis Verification[/bold cyan]")
+
+        ver_result = self.verification_agent.run(
+            context, max_iterations=config.hypothesis_verify_max_iter
+        )
+        result.agent_results["verification"] = {
+            "success": ver_result.success,
+            "llm_calls": ver_result.num_llm_calls,
+            "tool_calls": ver_result.num_tool_calls,
+            "prompt_tokens": ver_result.prompt_tokens,
+            "completion_tokens": ver_result.completion_tokens,
+            "total_tokens": ver_result.total_tokens,
+        }
+        result.total_llm_calls += ver_result.num_llm_calls
+        result.total_tool_calls += ver_result.num_tool_calls
+        result.total_prompt_tokens += ver_result.prompt_tokens
+        result.total_completion_tokens += ver_result.completion_tokens
+        result.total_tokens += ver_result.total_tokens
+
+        if ver_result.success:
+            self.verification_agent.process_result(ver_result, context)
+            result.agent_results["hypotheses"] = tracker.to_dict()
+            if verbose:
+                for h in tracker.to_dict():
+                    console.print(
+                        f"  🧪 {h['hid']}: {h['status']} "
+                        f"(posterior {h['posterior']:.2f}, {h['num_evidence']} evidence)"
+                    )
+        else:
+            logger.warning("Verification agent failed — posteriors stay at priors")
+
+    def _maybe_rerank(
+        self, result: LocalizationResult, context: AgentContext, verbose: bool = False
+    ) -> None:
+        """
+        E3 hook: hierarchical narrowing + listwise rerank of the top-K files.
+        Permutation-only and fail-open — with both flags off this is a no-op.
+        """
+        if not (
+            config.enable_listwise_rerank or config.enable_hierarchical_narrowing
+        ):
+            return
+        if not result.ranked_files:
+            return
+        try:
+            from evaluation.reranker import ListwiseReranker
+
+            pre_top1 = result.ranked_files[0]
+            ListwiseReranker().rerank(result, context)
+            if verbose and result.ranked_files and result.ranked_files[0] != pre_top1:
+                console.print(
+                    f"  🔀 Listwise rerank: Top-1 {pre_top1} → {result.ranked_files[0]}"
+                )
+        except Exception as e:
+            logger.warning(f"[Orchestrator] rerank stage failed (ignored): {e}")
 
     @staticmethod
     def _top_confidence(conf_result: AgentResult) -> float:
@@ -875,6 +1049,8 @@ class Orchestrator:
             git_recency=config.scoring.weight_git_recency,
             git_recency_half_life_days=config.scoring.git_recency_half_life_days,
             test_file_penalty=config.scoring.test_file_penalty,
+            hypothesis_support=config.scoring.weight_hypothesis_support,
+            rank_consensus=config.scoring.weight_rank_consensus,
         )
 
         scorer = UnifiedScorer(weights=weights)
@@ -911,6 +1087,22 @@ class Orchestrator:
             except Exception as e:
                 logger.debug(f"Semantic scoring failed: {e}")
 
+        hypothesis_scores = {}
+        if context.hypothesis_tracker is not None:
+            hypothesis_scores = context.hypothesis_tracker.file_scores()
+
+        # RRF consensus across stage rankings (LocAgent-style, 0 LLM calls)
+        consensus_scores = {}
+        if config.scoring.weight_rank_consensus > 0:
+            from evaluation.rank_fusion import (
+                reciprocal_rank_fusion,
+                stage_rankings_from_context,
+            )
+
+            consensus_scores = reciprocal_rank_fusion(
+                stage_rankings_from_context(context, result.ranked_locations)
+            )
+
         candidate_scores = scorer.score_candidates(
             candidates=result.ranked_files,
             repo_path=context.repo_path,
@@ -921,9 +1113,20 @@ class Orchestrator:
             graph_scores=graph_scores,
             semantic_scores=semantic_scores,
             method_counts=method_counts,
+            hypothesis_scores=hypothesis_scores,
+            consensus_scores=consensus_scores,
         )
 
         result.ranked_files = [s.file_path for s in candidate_scores]
+
+        # Persist the per-file signal breakdown: consumed by the listwise
+        # reranker's evidence cards and by offline miss analysis.
+        from dataclasses import asdict
+
+        result.agent_results["unified_scores"] = [
+            {k: (round(v, 4) if isinstance(v, float) else v) for k, v in asdict(s).items()}
+            for s in candidate_scores
+        ]
 
         score_map = {s.file_path: s for s in candidate_scores}
         for loc in result.ranked_locations:

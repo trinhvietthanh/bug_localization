@@ -27,6 +27,11 @@ class ScoringWeights:
     git_recency: float = 0.5
     git_recency_half_life_days: int = 90
     test_file_penalty: float = 0.5
+    # E1: hypothesis support — score is the max posterior of surviving
+    # hypotheses naming the file, or negative for falsified-only files
+    hypothesis_support: float = 0.8
+    # RRF consensus across pipeline-stage rankings (normalized 0..1)
+    rank_consensus: float = 1.0
 
 
 @dataclass
@@ -43,6 +48,8 @@ class CandidateScore:
     semantic_score: float = 0.0
     method_boost: float = 0.0
     git_recency_score: float = 0.0
+    hypothesis_score: float = 0.0
+    consensus_score: float = 0.0
     penalty: float = 0.0
     rank: int = 0
 
@@ -81,6 +88,8 @@ class UnifiedScorer:
         semantic_scores: dict[str, float] = None,
         method_counts: dict[str, int] = None,
         git_recency_scores: dict[str, float] = None,
+        hypothesis_scores: dict[str, float] = None,
+        consensus_scores: dict[str, float] = None,
     ) -> list[CandidateScore]:
         """
         Score all candidates and return sorted by total score.
@@ -98,6 +107,9 @@ class UnifiedScorer:
             git_recency_scores: Pre-computed recency scores [0,1] per file
                 (1 = touched in the most recent commit, decays with age).
                 If None, scores are computed lazily via git log.
+            hypothesis_scores: E1 signal per file — max posterior of surviving
+                hypotheses naming the file (0..1), or negative for files named
+                only by falsified hypotheses.
 
         Returns:
             List of CandidateScore objects sorted by total_score (descending)
@@ -110,6 +122,8 @@ class UnifiedScorer:
         semantic_scores = semantic_scores or {}
         method_counts = method_counts or {}
         git_recency_scores = dict(git_recency_scores) if git_recency_scores else None
+        hypothesis_scores = hypothesis_scores or {}
+        consensus_scores = consensus_scores or {}
 
         scores = []
 
@@ -129,6 +143,8 @@ class UnifiedScorer:
                 semantic_score=semantic_scores.get(file_path, 0.0),
                 method_count=method_counts.get(file_path, 0),
                 git_recency=recency,
+                hypothesis_score=hypothesis_scores.get(file_path, 0.0),
+                consensus_score=consensus_scores.get(file_path, 0.0),
             )
             scores.append(score)
 
@@ -150,6 +166,8 @@ class UnifiedScorer:
         semantic_score: float,
         method_count: int,
         git_recency: float = 0.0,
+        hypothesis_score: float = 0.0,
+        consensus_score: float = 0.0,
     ) -> CandidateScore:
         """Score a single candidate file."""
         score = CandidateScore(file_path=file_path)
@@ -183,6 +201,14 @@ class UnifiedScorer:
         if git_recency > 0:
             score.git_recency_score = git_recency * w.git_recency
 
+        if hypothesis_score != 0:
+            # May be negative: files named only by falsified hypotheses are
+            # actively demoted (the one signal that can lower a confident miss)
+            score.hypothesis_score = hypothesis_score * w.hypothesis_support
+
+        if consensus_score > 0:
+            score.consensus_score = consensus_score * w.rank_consensus
+
         if self._is_test_file(file_path):
             score.penalty = w.test_file_penalty
 
@@ -195,6 +221,8 @@ class UnifiedScorer:
             + score.semantic_score
             + score.method_boost
             + score.git_recency_score
+            + score.hypothesis_score
+            + score.consensus_score
             - score.penalty
         )
 
