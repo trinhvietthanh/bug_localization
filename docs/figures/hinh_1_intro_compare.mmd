@@ -1,0 +1,24 @@
+%% Định vị lỗi: truyền thống (thủ công) vs hệ thống đề xuất
+flowchart LR
+    subgraph T["🔧 Truyền thống — thủ công"]
+        direction TB
+        T1["🐛 Bug report"]
+        T2["👨‍💻 Lập trình viên<br/>đọc & duyệt mã"]
+        T3["⏰ 30–50% thời gian<br/>giới hạn nhận thức"]
+        T4["📍 Vị trí lỗi"]
+        T1 --> T2 --> T3 --> T4
+    end
+
+    subgraph H["🤖 Hệ thống đề xuất — tự động"]
+        direction TB
+        H1["🐛 Bug report<br/>+ mã nguồn"]
+        H2["3 Tác tử + RAG + CPG<br/>Comprehension → Navigation → Confirmation"]
+        H3["⚡ ~4 phút / instance"]
+        H4["📍 Ranked files<br/>Top-1: 78%"]
+        H1 --> H2 --> H3 --> H4
+    end
+
+    classDef trad fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000
+    classDef prop fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    class T1,T2,T3,T4 trad
+    class H1,H2,H3,H4 prop

@@ -51,6 +51,7 @@ from commands.index import cmd_index
 from commands.graph import cmd_graph
 from commands.defects4j import cmd_defects4j
 from commands.swebench import cmd_swebench
+from commands.sweexplore import cmd_sweexplore
 
 
 def main():
@@ -181,6 +182,23 @@ def main():
     swe_parser.add_argument("--dry-run", action="store_true", help="Preview bugs without running")
     swe_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
 
+    # sweexplore command
+    explore_parser = subparsers.add_parser("sweexplore", help="Evaluate on SWE-Explore benchmark")
+    explore_parser.add_argument(
+        "--dataset", type=str, default="ByteDance-Seed/SWE-explore",
+        help="SWE-Explore dataset name (default: ByteDance-Seed/SWE-explore)",
+    )
+    explore_parser.add_argument("--split", type=str, default="train", help="Dataset split (default: train)")
+    explore_parser.add_argument("--instance-id", type=str, help="Single instance ID")
+    explore_parser.add_argument("--limit", type=int, help="Max instances to evaluate")
+    explore_parser.add_argument(
+        "--workers", type=int, default=1, help="Number of concurrent bug evaluations"
+    )
+    explore_parser.add_argument("--output", type=str, help="Output result path base")
+    explore_parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    explore_parser.add_argument("--dry-run", action="store_true", help="Preview bugs without running")
+    explore_parser.add_argument("--no-graph-rag", action="store_true", help="Disable Graph RAG")
+
     args = parser.parse_args()
     setup_logging(args.log_level)
 
@@ -195,6 +213,7 @@ def main():
         "graph": cmd_graph,
         "defects4j": cmd_defects4j,
         "swebench": cmd_swebench,
+        "sweexplore": cmd_sweexplore,
     }
 
     command_map[args.command](args)

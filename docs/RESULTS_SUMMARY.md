@@ -173,7 +173,7 @@ Tỷ lệ đúng:sai thực = **1.8:1** (không phải 3:1 như subset 100 từn
 
 ### 7.4 Cấu hình khuyến nghị (production)
 
-Giữ **baseline E1+E2+E3** (78.0/87.3/89.3 @ 34.7 calls) làm cấu hình chính. RRF/Patch Duel giữ dưới flag (`ENABLE_PATCH_DUEL`, `SCORE_WEIGHT_CONSENSUS`) làm tùy chọn, không bật default.
+Giữ **baseline E1+E2+E3** (78.0/87.3/89.3 @ 34.7 calls) làm cấu hình chính. RRF consensus và Patch Duel đã bị loại khỏi source chạy chính sau khi kiểm chứng full-set cho kết quả không có ý nghĩa; artifact và phân tích lịch sử vẫn được giữ để bảo toàn bằng chứng thực nghiệm.
 
 ---
 
@@ -196,5 +196,4 @@ Giữ **baseline E1+E2+E3** (78.0/87.3/89.3 @ 34.7 calls) làm cấu hình chín
 | `results/swebench_300_v2.json`                 | RRF+Duel 300 (kiểm chứng NULL)                  |
 | `results/ablation_*.json`                      | 7 thí nghiệm ablation (n=50/100)                |
 | `results/swebench_300_e123_qwen.log`           | Log chi tiết baseline (iter counts, tool calls) |
-
 

@@ -1,8 +1,8 @@
 # Tài liệu Kiến trúc Hệ thống Bug Localization (Multi-Agent & RAG)
 
-> Cập nhật: 2026-07-13 — đồng bộ với cấu hình chuẩn đã xác nhận bằng thực nghiệm (n=300, xem [RESULTS_SUMMARY.md](RESULTS_SUMMARY.md)): **E1+E2+E3 bật, H1 (patch duel) và RRF consensus tắt** — hai cơ chế sau cho kết quả không có ý nghĩa thống kê trên mẫu đủ lớn dù có tín hiệu tích cực trên mẫu nhỏ (§4.6). Bản trình bày rút gọn cho luận văn (chỉ vẽ đúng cấu hình chuẩn, không có khối điều kiện) xem [CHUONG_KIEN_TRUC.md](CHUONG_KIEN_TRUC.md). Chi tiết dạng text xem [ARCHITECTURE.md](../ARCHITECTURE.md); bối cảnh nghiên cứu xem [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md).
+> Cập nhật: 2026-07-28 — đồng bộ với cấu hình chuẩn đã xác nhận bằng thực nghiệm (n=300, xem [RESULTS_SUMMARY.md](RESULTS_SUMMARY.md)): **E1+E2+E3**. Patch Duel và RRF consensus đã bị loại khỏi source chạy chính vì không cho cải thiện có ý nghĩa trên mẫu đủ lớn; artifact lịch sử vẫn được giữ trong báo cáo kết quả. Bản trình bày rút gọn xem [CHUONG_KIEN_TRUC.md](CHUONG_KIEN_TRUC.md).
 
-Tài liệu này mô tả kiến trúc tổng thể của hệ thống Bug Localization, dùng làm tham chiếu kỹ thuật đầy đủ (liệt kê mọi công tắc cấu hình, kể cả các nhánh không bật trong cấu hình chuẩn). Hệ thống sử dụng mô hình Multi-Agent kết hợp với Retrieval-Augmented Generation (RAG) và Code Property Graph (CPG) để tìm kiếm và định vị nguyên nhân gây lỗi trong mã nguồn một cách tự động. Các tính năng mở rộng E1/E2/E3/H1 đều có công tắc `.env` riêng và không đổi schema output nên có thể bật/tắt độc lập — **cấu hình chuẩn (production) là E1=on, E2=on, E3=on, H1=off, RRF=off**.
+Tài liệu này mô tả kiến trúc tổng thể của hệ thống Bug Localization. Hệ thống sử dụng Multi-Agent kết hợp Retrieval-Augmented Generation (RAG) và Code Property Graph (CPG). Các tính năng mở rộng E1/E2/E3 có công tắc `.env` riêng và không đổi schema output nên có thể bật/tắt độc lập.
 
 ---
 
@@ -37,7 +37,7 @@ flowchart TD
         REF -- "No" --> FS[Final Ranked Locations]
     end
 
-    FS --> US["Unified Scorer\n10 tín hiệu (bao gồm E1 hypothesis_support)"]
+    FS --> US["Unified Scorer\n9 tín hiệu (bao gồm E1 hypothesis_support)"]
     US --> LR2["ListwiseReranker [E3]\nnarrow file→function + rerank top-K\n(permutation-only, fail-open)"]
     LR2 --> VAL[File-path Validation\nnever-empty fallback]
     VAL --> LR([Localization Result\nRanked Files, Methods, & Locations])
@@ -59,8 +59,6 @@ flowchart TD
 | `ENABLE_HYPOTHESIS_LOOP` (E1) | Comprehension chỉ sinh 1 fault hypothesis; không có `hypothesis_support` trong Unified Scorer | Sinh K=4 giả thuyết cạnh tranh; posterior cập nhật qua `HypothesisTracker` |
 | `ENABLE_PRIORITY_EXPLORATION` (E2) | Dùng `NavigationAgent` (tool loop tự do, cap 10); nếu E1 bật thì chạy thêm `VerificationAgent` riêng ở Phase 2.5 | Dùng `PriorityNavigationAgent`; Verification bị bỏ qua vì Explorer tự gắn nhãn evidence |
 | `ENABLE_LISTWISE_RERANK` (E3) | Bỏ qua bước rerank, dùng thẳng thứ tự Unified Scorer | Rerank top-K bằng 1 LLM call bổ sung (permutation-only) |
-| `ENABLE_PATCH_DUEL` (H1) | Bỏ qua | Thêm 1 LLM call phân xử #1 vs #2 — **đã đo n=300: không có ý nghĩa thống kê, khuyến nghị giữ tắt** |
-| `SCORE_WEIGHT_CONSENSUS` (RRF) | Không cộng tín hiệu đồng thuận | Cộng RRF 4-stage vào Unified Scorer — **đã đo n=300: không có ý nghĩa thống kê, khuyến nghị giữ tắt** |
 
 ---
 
@@ -77,7 +75,7 @@ C4Context
     title Context Diagram - Bug Localization System
 
     Person(dev, "Developer / QA / AI System", "Người dùng hoặc hệ thống muốn tìm vị trí file/method gây ra lỗi.")
-    System(bugSystem, "Bug Localization System", "Hệ thống AI đa tác vụ (Multi-Agent) hỗ trợ RAG và CPG để định vị nguồn gốc lỗi. Cấu hình chuẩn: giả thuyết cạnh tranh (E1), khám phá ưu tiên (E2), listwise rerank (E3) bật; patch duel (H1) và RRF consensus tắt.")
+    System(bugSystem, "Bug Localization System", "Hệ thống AI đa tác vụ (Multi-Agent) hỗ trợ RAG và CPG để định vị nguồn gốc lỗi. Cấu hình chuẩn gồm giả thuyết cạnh tranh (E1), khám phá ưu tiên (E2) và listwise rerank (E3).")
 
     System_Ext(llm, "LLM Provider", "OpenAI-compatible: Qwen/DashScope, OpenRouter, Gemini, Ollama/vLLM. Cung cấp API sinh ngôn ngữ và logic cho Agent.")
     System_Ext(vcs, "Codebase / VCS", "Git repository cục bộ chứa mã nguồn cần fix.")
@@ -108,7 +106,7 @@ C4Container
         Container(core_engine, "Core Explorer Engine", "Python", "[E2] core/explorer.py — priority-queue scheduler agnostic với LLM/tool, unit-testable riêng.")
         Container(rag, "RAG & Graph Engine", "Python", "Xử lý code chunking, vector embedding, Code Property Graph builders (Python/Java), hop-distance API cho E2.")
         Container(tools, "Tools Registry", "Python", "Cung cấp các sandbox tools (semantic search, code search, file read/outline, git log) để agents sử dụng.")
-        Container(eval, "Evaluation Module", "Python", "Benchmarks (SWE-Bench, Defects4J), Metrics (Top-N, MRR, MAP), Unified Scorer (10 tín hiệu), Listwise Reranker (E3). RRF consensus có sẵn nhưng tắt mặc định.")
+        Container(eval, "Evaluation Module", "Python", "Benchmarks (SWE-Bench, Defects4J), Metrics (Top-N, MRR, MAP), Unified Scorer (9 tín hiệu), Listwise Reranker (E3).")
 
         ContainerDb(qdrant, "Vector Database", "Qdrant", "Lưu trữ các vector nhúng (embeddings) của code chunks dùng cho RAG Hybrid Search.")
         ContainerDb(neo4j, "Graph Database", "Neo4j (mặc định khi NEO4J_ENABLED) / In-memory fallback", "Lưu trữ cấu trúc đồ thị (AST, caller/callee, class hierarchy) để truy vấn Graph RAG. Kết nối lỗi → tự fallback in-memory, không crash pipeline.")
@@ -143,8 +141,7 @@ C4Component
 
     Container_Boundary(orchestrator_bnd, "Orchestrator Module") {
         Component(context, "Agent Context", "Dataclass", "Lưu trữ trạng thái dùng chung (bug_info, suspicious_files, stack_traces, hypotheses, hypothesis_tracker).")
-        Component(unified_scorer, "Unified Scorer", "Python", "Multi-signal reranking (10 tín hiệu) sau khi agents chạy xong.")
-        Component(rank_fusion, "Rank Fusion", "Python", "[mới] RRF đồng thuận đa tầng — 1 trong 10 tín hiệu của Unified Scorer, 0 LLM call.")
+        Component(unified_scorer, "Unified Scorer", "Python", "Multi-signal reranking (9 tín hiệu) sau khi agents chạy xong.")
     }
 
     Container_Boundary(agents_bnd, "Multi-Agent System") {
@@ -152,7 +149,7 @@ C4Component
         Component(navigation, "Navigation Agent", "Agent", "Khám phá codebase tự do dựa trên keyword, semantic search, CPG.")
         Component(priority_nav, "Priority Navigation Agent", "Agent [E2]", "Khám phá qua priority-queue scheduler; fallback về Navigation Agent nếu tìm được quá ít.")
         Component(verification, "Verification Agent", "Agent [E1]", "Thu bằng chứng ủng hộ/bác bỏ cho từng giả thuyết cạnh tranh.")
-        Component(confirmation, "Confirmation Agent", "Agent", "loop/single/hybrid — xếp hạng candidates, tạo Reflection feedback, patch_duel [H1].")
+        Component(confirmation, "Confirmation Agent", "Agent", "loop/single/hybrid — xếp hạng candidates và tạo Reflection feedback.")
         Component(hypothesis_tracker, "Hypothesis Tracker", "Python [E1]", "Belief tracking bằng log-odds thuần Python — LLM chỉ gắn nhãn bằng chứng.")
     }
 
@@ -194,7 +191,6 @@ C4Component
     Rel(rag_tools, tool_cache, "Read / Write Cache")
     Rel(context, unified_scorer, "Gửi kết quả cuối cùng để re-rank")
     Rel(hypothesis_tracker, unified_scorer, "file_scores() — tín hiệu thứ 10")
-    Rel(unified_scorer, rank_fusion, "Gọi reciprocal_rank_fusion() trên 4 stage ranking")
     Rel(unified_scorer, reranker, "unified_scores + ranked_locations → evidence card")
     Rel(reranker, tool_reg, "skeleton_for_files() (không qua registry, gọi trực tiếp)")
 ```
@@ -280,8 +276,7 @@ flowchart TD
     RAG --> R_GRET["graph_retriever.py\n(+ find_anchor_nodes/hop_distance cho E2)"]
     RAG --> R_IDX[indexer.py]
 
-    ORCH --> EVAL2["evaluation/unified_scorer.py\n(10 tín hiệu)"]
-    EVAL2 --> RF["evaluation/rank_fusion.py"]
+    ORCH --> EVAL2["evaluation/unified_scorer.py\n(9 tín hiệu)"]
     ORCH --> RR["evaluation/reranker.py [E3]\n(ListwiseReranker)"]
     RR --> TOOLS
 

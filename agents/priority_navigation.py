@@ -125,15 +125,20 @@ class PriorityNavigationAgent(NavigationAgent):
 
     # ── explorer wiring ──────────────────────────────────────────────────────
 
-    def _build_explorer(
-        self, result: AgentResult, context: AgentContext
-    ) -> PriorityExplorer:
-        w_graph = (
+    @staticmethod
+    def _w_graph_for(context: AgentContext) -> float:
+        return (
             config.exploration_w_graph_java
             if context.language == "java"
             else config.exploration_w_graph
         )
 
+    def _compute_graph_distances(self, context: AgentContext) -> dict[str, int]:
+        """Multi-source hop distances from all anchors (stack/mentioned/hypotheses).
+
+        Also touches the GraphRetriever's lazy indexes, so calling this once on
+        the main thread pre-warms them before scouts fan out (MACS).
+        """
         anchor_files = list(
             dict.fromkeys(
                 (context.stack_trace_files or [])
@@ -161,7 +166,10 @@ class PriorityNavigationAgent(NavigationAgent):
                 )
             except Exception as e:
                 logger.debug(f"[PriorityNavigation] graph distances unavailable: {e}")
+        return graph_distances
 
+    @staticmethod
+    def _compute_static_priors(context: AgentContext) -> dict[str, float]:
         static_priors: dict[str, float] = {}
         for fp in context.stack_trace_files or []:
             static_priors[fp] = PRIOR_STACK_TRACE
@@ -178,6 +186,14 @@ class PriorityNavigationAgent(NavigationAgent):
                     static_priors.setdefault(fp, PRIOR_HYPOTHESIS * h.prior)
         for fp in context.candidate_files or []:
             static_priors.setdefault(fp, PRIOR_PATH_KEYWORD)
+        return static_priors
+
+    def _build_explorer(
+        self, result: AgentResult, context: AgentContext
+    ) -> PriorityExplorer:
+        w_graph = self._w_graph_for(context)
+        graph_distances = self._compute_graph_distances(context)
+        static_priors = self._compute_static_priors(context)
 
         explorer = PriorityExplorer(
             execute=lambda action: self._execute_action(action, result, context),
@@ -320,6 +336,7 @@ class PriorityNavigationAgent(NavigationAgent):
         tool_output: str,
         result: AgentResult,
         context: AgentContext,
+        evidence_handler=None,
     ) -> Observation | None:
         fp = action.target.split("::", 1)[0]
         bug_line = (
@@ -329,9 +346,10 @@ class PriorityNavigationAgent(NavigationAgent):
         ) or context.problem_statement[:300]
 
         top_findings = ""  # names + scores only, O(1) context
-        # (populated from prior observations via the trace to stay stateless)
+        # (populated from prior observations via the trace to stay stateless).
+        # Snapshot the shared list: MACS scouts append/read it concurrently.
         recent = [
-            t for t in context.agent_traces
+            t for t in list(context.agent_traces)
             if t.get("agent") == self.name and t.get("action") == "finding"
         ][-8:]
         if recent:
@@ -404,29 +422,56 @@ class PriorityNavigationAgent(NavigationAgent):
             )
 
         # E1 feedback: observations double as verification evidence
-        tracker = context.hypothesis_tracker
-        if tracker is not None:
-            from agents.hypothesis import EvidenceItem
-
-            for ev in parsed.get("hypothesis_evidence") or []:
-                if not isinstance(ev, dict):
-                    continue
-                try:
-                    direction = int(ev.get("direction", 0))
-                except (TypeError, ValueError):
-                    direction = 0
-                strength = str(ev.get("strength", "moderate")).lower()
-                if strength not in ("weak", "moderate", "strong"):
-                    strength = "moderate"
-                tracker.update(str(ev.get("hid", "")).strip(), EvidenceItem(
-                    probe_description=f"explorer:{action.target}",
-                    direction=direction,
-                    strength=strength,
-                    source_tool=action.kind,
-                    location=action.target,
-                    note=str(ev.get("note", ""))[:120],
-                ))
+        if evidence_handler is not None:
+            evidence_handler(context, parsed, action, obs)
+        else:
+            self._apply_hypothesis_evidence(context, parsed, action, obs)
         return obs
+
+    def _apply_hypothesis_evidence(
+        self,
+        context: AgentContext,
+        parsed: dict,
+        action: ExplorationAction,
+        obs: Observation,
+    ) -> None:
+        """Feed the observation's labeled evidence back into the tracker.
+
+        Subclasses (MACS) override to route updates through a shared,
+        lock-guarded blackboard and to trigger cross-scout pruning.
+        """
+        tracker = context.hypothesis_tracker
+        if tracker is None:
+            return
+        for hid, ev in self._iter_hypothesis_evidence(parsed, action):
+            tracker.update(hid, ev)
+
+    @staticmethod
+    def _iter_hypothesis_evidence(parsed: dict, action: ExplorationAction):
+        """Yield (hid, EvidenceItem) for each valid hypothesis_evidence entry."""
+        from agents.hypothesis import EvidenceItem
+
+        for ev in parsed.get("hypothesis_evidence") or []:
+            if not isinstance(ev, dict):
+                continue
+            hid = str(ev.get("hid", "")).strip()
+            if not hid:
+                continue
+            try:
+                direction = int(ev.get("direction", 0))
+            except (TypeError, ValueError):
+                direction = 0
+            strength = str(ev.get("strength", "moderate")).lower()
+            if strength not in ("weak", "moderate", "strong"):
+                strength = "moderate"
+            yield hid, EvidenceItem(
+                probe_description=f"explorer:{action.target}",
+                direction=direction,
+                strength=strength,
+                source_tool=action.kind,
+                location=action.target,
+                note=str(ev.get("note", ""))[:120],
+            )
 
     @staticmethod
     def _findings_to_locations(findings) -> list[dict]:

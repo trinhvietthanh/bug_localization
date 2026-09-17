@@ -39,7 +39,10 @@ from rich.logging import RichHandler
 from config import config
 from data.loader import SWEBenchLoader
 from agents.orchestrator import Orchestrator
-from evaluation.metrics import compute_metrics, top_n_accuracy, reciprocal_rank, average_precision
+from evaluation.metrics import (
+    compute_metrics, top_n_accuracy, reciprocal_rank, average_precision,
+    method_top_n_accuracy, method_reciprocal_rank, method_average_precision,
+)
 from evaluation.export import export_results
 
 console = Console()
@@ -190,7 +193,7 @@ def run_benchmark(args):
         dataset_instances = [single_inst]
     else:
         dataset_instances = loader.load(split=args.split)
-        if args.instance_ids_file:
+        if hasattr(args, "instance_ids_file") and args.instance_ids_file:
             wanted = {
                 line.strip()
                 for line in Path(args.instance_ids_file).read_text().splitlines()
@@ -267,6 +270,16 @@ def run_benchmark(args):
                 r_r = reciprocal_rank(p_files, g_files)
                 a_p = average_precision(p_files, g_files)
 
+                # Method-level granularity — same metrics over the agent's
+                # ranked_methods vs buggy_methods extracted from the gold patch.
+                p_methods = list(res.ranked_methods or [])
+                g_methods = list(bug.buggy_methods or [])
+                mh1 = method_top_n_accuracy(p_methods, g_methods, 1)
+                mh3 = method_top_n_accuracy(p_methods, g_methods, 3)
+                mh5 = method_top_n_accuracy(p_methods, g_methods, 5)
+                mrr = method_reciprocal_rank(p_methods, g_methods)
+                map_ = method_average_precision(p_methods, g_methods)
+
                 e_time = time.time() - start_t
 
                 inst_res = {
@@ -275,6 +288,15 @@ def run_benchmark(args):
                     "ground_truth": g_files,
                     "top1_hit": h1, "top3_hit": h3, "top5_hit": h5,
                     "rr": r_r, "ap": a_p, "time": e_time,
+                    # Method-level (None when GT has no method, so the aggregate
+                    # denominator excludes such instances instead of crediting 0).
+                    "predicted_methods": p_methods[:5],
+                    "ground_truth_methods": g_methods,
+                    "method_top1_hit": mh1 if g_methods else None,
+                    "method_top3_hit": mh3 if g_methods else None,
+                    "method_top5_hit": mh5 if g_methods else None,
+                    "method_rr": mrr if g_methods else None,
+                    "method_ap": map_ if g_methods else None,
                     "success": res.success,
                     "llm_calls": res.total_llm_calls,
                     "tool_calls": res.total_tool_calls,
@@ -379,6 +401,23 @@ def run_benchmark(args):
     metrics["total_time_seconds"] = round(total_time, 2)
     metrics["avg_time_per_instance"] = round(total_time / len(per_instance), 2) if per_instance else 0
 
+    # Method-level aggregate — average only over instances that HAVE a GT method
+    # (rest are None), so the denominator is honest.
+    m_rows = [i for i in per_instance if i.get("method_top1_hit") is not None]
+    if m_rows:
+        n_m = len(m_rows)
+        metrics["method_top_1_accuracy"] = sum(i["method_top1_hit"] for i in m_rows) / n_m
+        metrics["method_top_3_accuracy"] = sum(i["method_top3_hit"] for i in m_rows) / n_m
+        metrics["method_top_5_accuracy"] = sum(i["method_top5_hit"] for i in m_rows) / n_m
+        metrics["method_mrr"] = sum(i["method_rr"] for i in m_rows) / n_m
+        metrics["method_map"] = sum(i["method_ap"] for i in m_rows) / n_m
+        metrics["method_evaluable_instances"] = n_m
+    else:
+        for k in ("method_top_1_accuracy", "method_top_3_accuracy", "method_top_5_accuracy",
+                  "method_mrr", "method_map"):
+            metrics[k] = 0.0
+        metrics["method_evaluable_instances"] = 0
+
     # Display results
     console.print("\n")
     results_table = Table(title="📊 SWE-bench Benchmark Results", border_style="bright_blue")
@@ -391,6 +430,12 @@ def run_benchmark(args):
         ("Top-5 Accuracy", metrics.get("top_5_accuracy", 0), True),
         ("MRR (Mean Reciprocal Rank)", metrics.get("mrr", 0), True),
         ("MAP (Mean Average Precision)", metrics.get("map", 0), True),
+        ("— Method-level (Top-N / MRR / MAP) —", f"n={metrics.get('method_evaluable_instances', 0)}", False),
+        ("Method Top-1 Accuracy", metrics.get("method_top_1_accuracy", 0), True),
+        ("Method Top-3 Accuracy", metrics.get("method_top_3_accuracy", 0), True),
+        ("Method Top-5 Accuracy", metrics.get("method_top_5_accuracy", 0), True),
+        ("Method MRR", metrics.get("method_mrr", 0), True),
+        ("Method MAP", metrics.get("method_map", 0), True),
         ("Total Instances", metrics.get("total_instances", 0), False),
         ("Instances with Match", metrics.get("instances_with_match", 0), False),
         ("Total Time", f"{total_time:.1f}s ({total_time/60:.1f}min)", False),

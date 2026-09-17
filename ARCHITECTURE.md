@@ -9,7 +9,7 @@ Hệ thống bug localization là một pipeline AI đa agent, kết hợp bốn
 - **Multi-Agent Orchestration**: Comprehension → (Verification) → Navigation → Confirmation phối hợp để phân tích và định vị bug, với vòng reflection tối đa 2 lần khi confidence thấp.
 - **Retrieval-Augmented Generation (RAG)**: Vector search (Qdrant) + BM25 hybrid search để tìm đoạn code liên quan theo ngữ nghĩa.
 - **Code Property Graph (CPG)**: Đồ thị AST của codebase (in-memory hoặc Neo4j persistent), lưu quan hệ giữa hàm/lớp (gọi nhau, kế thừa, import) — dùng cho Navigation, scoring, và priority exploration.
-- **Post-hoc reranking**: Unified multi-signal scoring (10 tín hiệu) + tùy chọn listwise LLM rerank trên top-K.
+- **Post-hoc reranking**: Unified multi-signal scoring (9 tín hiệu) + tùy chọn listwise LLM rerank trên top-K.
 
 Ba tính năng mở rộng (E1/E2/E3) đều có công tắc `.env` riêng và **mặc định TẮT** — bật/tắt không đổi schema output nên downstream (scorer, evaluator) không cần biết cấu hình nào đang chạy:
 
@@ -18,7 +18,6 @@ Ba tính năng mở rộng (E1/E2/E3) đều có công tắc `.env` riêng và *
 | **E1** | Giả thuyết cạnh tranh | `ComprehensionAgent` sinh K=3-5 giả thuyết falsifiable; `VerificationAgent` thu bằng chứng; `HypothesisTracker` cập nhật belief bằng log-odds thuần Python | `ENABLE_HYPOTHESIS_LOOP=false` |
 | **E2** | Khám phá hàng đợi ưu tiên | `PriorityNavigationAgent` + `core/explorer.py` thay vòng lặp tool-calling tự do bằng priority-queue scheduler; LLM chỉ chấm điểm quan sát với context O(1) | `ENABLE_PRIORITY_EXPLORATION=false` |
 | **E3** | Thu hẹp phân cấp + Listwise rerank | `evaluation/reranker.py` — 1 call structured thu hẹp file→function, 1 call listwise xếp lại top-K (permutation-only) | `ENABLE_HIERARCHICAL_NARROWING=false`, `ENABLE_LISTWISE_RERANK=false` |
-| **H1** | Patch duel | 1 call cuối cùng "vẽ" patch cụ thể cho #1 và #2, chọn file mà patch thật sự sửa | `ENABLE_PATCH_DUEL=false` |
 
 ### Luồng xử lý tổng thể (đầy đủ, mọi flag bật)
 
@@ -165,8 +164,6 @@ Config (singleton)
 | `CONFIRMATION_EVIDENCE_TOP_K` | `8` | Số candidate đưa vào evidence pack |
 | `CONFIRMATION_EVIDENCE_MAX_LINES` | `100` | Trần dòng excerpt mỗi candidate |
 | `CONFIRMATION_MIN_EVIDENCE` | `3` | Số excerpt tối thiểu để coi evidence "đủ" (nếu không đủ → fallback tool loop cấu trúc) |
-| `ENABLE_PATCH_DUEL` | `false` | [H1] 1 call cuối "vẽ" patch cho #1 và #2, chọn file thật sự sửa root cause |
-| `PATCH_DUEL_MAX_LINES` | `150` | Trần dòng excerpt mỗi candidate trong patch duel |
 
 ### Feature flags E1 — Giả thuyết cạnh tranh
 
@@ -200,7 +197,7 @@ Config (singleton)
 | `LISTWISE_RERANK_TOP_K` | `10` | Số file được rerank |
 | `LISTWISE_RERANK_PASSES` | `1` | >1 → nhiều pass shuffle khác nhau, hợp nhất bằng RRF (đo position bias dư) |
 
-### `ScoringConfig` — 10 tín hiệu UnifiedScorer
+### `ScoringConfig` — 9 tín hiệu UnifiedScorer
 
 | Weight | Default | Tín hiệu |
 |---|---|---|
@@ -213,7 +210,6 @@ Config (singleton)
 | `SCORE_WEIGHT_METHOD` | 0.3 | Method aggregation (nhiều method cùng file) |
 | `SCORE_WEIGHT_GIT_RECENCY` | 0.5 | Recency commit (half-life 90 ngày) |
 | `SCORE_WEIGHT_HYPOTHESIS` | 0.8 | **[E1]** Posterior giả thuyết còn sống nêu file này; **âm** nếu file chỉ thuộc giả thuyết đã bác bỏ |
-| `SCORE_WEIGHT_CONSENSUS` | 1.0 | **[mới]** RRF đồng thuận đa tầng (comprehension/explorer/confirmation/stack-trace) — `evaluation/rank_fusion.py`, LocAgent-style, 0 LLM call |
 | `SCORE_TEST_PENALTY` | 0.5 | Phạt file test |
 
 ---
@@ -247,7 +243,6 @@ class AgentContext:
     candidate_files: list[str]             # tích lũy qua các phase
     candidate_methods: list[str]
     suspicious_locations: list[dict]       # output có cấu trúc của Navigation — bằng chứng cho Confirmation single-shot
-    comprehension_candidates: list[str]    # snapshot ngay sau Comprehension (RRF stage ranking)
     navigation_was_freeform: bool          # True nếu Navigation dùng tool loop tự do (line range kém tin cậy hơn)
     repo_skeleton: str
     reflection_feedback: str
@@ -392,7 +387,7 @@ priority(target) = W_LLM × llm_relevance(parent)/10
 
 ---
 
-### 3.4 `agents/confirmation.py` — Confirmation Agent (v2 hybrid + H1)
+### 3.4 `agents/confirmation.py` — Confirmation Agent (v2 hybrid)
 
 **Vai trò**: Xem xét lại danh sách ứng viên, xếp hạng cuối cùng theo confidence.
 
@@ -402,8 +397,6 @@ priority(target) = W_LLM × llm_relevance(parent)/10
 - **`hybrid`** — chạy `single` trước, rồi `_verify_top()`: vòng tool ngắn (`CONFIRMATION_VERIFY_ITERS`) chỉ phân định rank-1 giữa top-3 của listwise (payload truyền qua `context._verify_stage_message` vì agent instance chia sẻ giữa các worker thread benchmark, còn context là per-instance); phần đuôi ranking giữ nguyên (bảo toàn recall).
 
 **Escalation về `loop` là cấu trúc, không dựa self-reported confidence**: khi evidence pack quá mỏng (`with_excerpts < CONFIRMATION_MIN_EVIDENCE` và không có candidate score ≥ 0.8) hoặc `context.navigation_was_freeform=True`.
-
-**`patch_duel()` — [H1]**: gọi độc lập từ `Orchestrator._run_patch_duel()` sau khi mọi tầng ranking khác đã chạy. 1 call yêu cầu LLM "vẽ" patch cụ thể cho cả file #1 và #2 (nhãn A/B theo thứ tự alphabet, không tiết lộ rank hiện tại để tránh anchor bias), rồi chọn file mà patch thật sự sửa root cause. Nhắm vào lỗi nhầm layer liền kề (settings vs logic đọc settings, serializer vs command gọi, base class vs subclass) — nhóm lỗi "gold ở rank 2" chiếm ~7% trên benchmark 300-run.
 
 **`get_reflection_message()`**: khi confidence thấp, sinh guidance cho reflection round tiếp theo (mở rộng phạm vi tìm kiếm, ưu tiên stack-trace, tìm theo error message literal). **[E1]** Nếu có `hypothesis_tracker`, `Orchestrator` ưu tiên dùng `tracker.reflection_summary()` (chỉ đích danh giả thuyết nào đã bị bác bỏ + giả thuyết nào còn probe chưa kiểm) thay cho message chung chung.
 
@@ -442,7 +435,6 @@ Phase 0   [background thread]:
 Phase 1:  ComprehensionAgent.run(context)   — xem §3.2
           → context.fault_hypothesis, candidate_files cập nhật
           → Stack trace file boosting (đẩy file trong stack trace lên đầu)
-          → context.comprehension_candidates = snapshot (cho RRF consensus)
 
           Chờ background graph thread (timeout 300s, fail-open nếu lỗi)
           → context.graph_retriever = graph
@@ -457,16 +449,13 @@ Vòng lặp reflection [round 0..REFLECTION_MAX_ROUNDS]:
              if top1_confidence ≥ threshold hoặc round cuối: break
              else: reflection_feedback = hyp_summary (E1) hoặc generic message; lặp lại
 
-Phase 4:  UnifiedScorer (nếu ENABLE_UNIFIED_SCORING) — 10 tín hiệu, §6
+Phase 4:  UnifiedScorer (nếu ENABLE_UNIFIED_SCORING) — 9 tín hiệu, §6
           → result.agent_results["unified_scores"] lưu breakdown per-file
             (dùng lại bởi evidence card của E3 + phân tích miss offline)
 
 Phase 5:  [E3] ListwiseReranker.rerank() — narrow + rerank top-K, permutation-only
 
-Phase 6:  [H1] _run_patch_duel() — chỉ hoán đổi #1/#2, chạy SAU CÙNG nên
-          quyết định của nó là cuối cùng
-
-Phase 7:  _filter_nonexistent_files() — loại path ảo do LLM hallucinate;
+Phase 6:  _filter_nonexistent_files() — loại path ảo do LLM hallucinate;
           thử biến thể prefix (source root, top-level dir, __init__.py);
           KHÔNG BAO GIỜ trả prediction rỗng — nếu mọi path bị lọc, giữ
           nguyên bản gốc chưa validate (một dự đoán sai vẫn hơn không có gì)
@@ -656,15 +645,9 @@ extract_methods_from_locations(ranked_locations)  # ranked_locations → method 
 # _paths_match(): flexible path matching, xử lý source root variants
 ```
 
-### `evaluation/unified_scorer.py` — Multi-signal Reranking (10 tín hiệu)
+### `evaluation/unified_scorer.py` — Multi-signal Reranking (9 tín hiệu)
 
 Xem bảng đầy đủ ở §2 (`ScoringConfig`). `CandidateScore` giờ có thêm `hypothesis_score`, `consensus_score`; `UnifiedScorer.score_candidates()` nhận thêm `hypothesis_scores`/`consensus_scores` dict.
-
-### `evaluation/rank_fusion.py` — **[mới]** RRF đồng thuận đa tầng
-
-`reciprocal_rank_fusion(rankings, k=60)`: fuse N rank-list thành `{file: score}` chuẩn hoá [0,1] — tín hiệu thứ 10 của UnifiedScorer. `stage_rankings_from_context()` lắp 4 rank-list từ context: confirmation ranking, explorer relevance order, comprehension candidates snapshot, stack-trace order.
-
-> Lưu ý: có **2 cài đặt RRF song song** trong codebase — hàm này (dict, chuẩn hoá [0,1], dùng cho tín hiệu consensus) và `utils/ranking.py::reciprocal_rank_fusion` (list-of-tuple có trọng số, dùng cho `multi_pass_localize()` và merge nhiều-pass của E3 reranker). Không phải bug nhưng là trùng lặp — xem `docs/DANH_GIA_CODE_E1E2E3.md` §2.2.
 
 ### `evaluation/reranker.py` — **[mới, E3]** `ListwiseReranker`
 
@@ -831,8 +814,7 @@ main.py
 evaluation/
     ├── evaluator.py ──────► orchestrator.py
     ├── metrics.py
-    ├── unified_scorer.py ──uses──► hypothesis.py (file_scores), rank_fusion.py
-    ├── rank_fusion.py     (RRF đồng thuận đa tầng)
+    ├── unified_scorer.py ──uses──► hypothesis.py (file_scores)
     ├── reranker.py        (E3, gọi từ orchestrator._maybe_rerank) ──uses──► repo_skeleton.skeleton_for_files
     └── export.py
 
@@ -859,11 +841,11 @@ thesis/
 │
 ├── agents/
 │   ├── base_agent.py                # AgentContext, BaseAgent, AgentResult
-│   ├── orchestrator.py              # Pipeline orchestration, multi-pass, reflection, E1/E2/E3/H1 hooks
+│   ├── orchestrator.py              # Pipeline orchestration, multi-pass, reflection, E1/E2/E3 hooks
 │   ├── comprehension.py             # Phase 1: v2/v3 single-shot+verify-shot+escalation, hypotheses (E1)
 │   ├── navigation.py                # Phase 2: Codebase exploration (tool loop tự do)
 │   ├── priority_navigation.py       # [mới, E2] PriorityNavigationAgent
-│   ├── confirmation.py              # Phase 3: loop/single/hybrid + patch_duel (H1)
+│   ├── confirmation.py              # Phase 3: loop/single/hybrid
 │   ├── hypothesis.py                # [mới, E1] Hypothesis, HypothesisTracker (log-odds thuần Python)
 │   └── verification.py              # [mới, E1] VerificationAgent
 │
@@ -897,8 +879,7 @@ thesis/
 ├── evaluation/
 │   ├── evaluator.py                 # BenchmarkEvaluator (sequential + parallel)
 │   ├── metrics.py                   # Top-N, MRR, MAP, file/method level
-│   ├── unified_scorer.py            # Multi-signal reranking — 10 tín hiệu
-│   ├── rank_fusion.py               # [mới] RRF đồng thuận đa tầng
+│   ├── unified_scorer.py            # Multi-signal reranking — 9 tín hiệu
 │   ├── reranker.py                  # [mới, E3] ListwiseReranker (narrowing + rerank)
 │   └── export.py                    # CSV/JSON/Markdown export
 │

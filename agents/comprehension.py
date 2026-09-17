@@ -5,10 +5,12 @@ and generate hypotheses about its cause and location.
 """
 
 import logging
+import os
 from pathlib import Path
 
 from agents.base_agent import BaseAgent, AgentContext, AgentResult
 from tools.registry import TOOL_REGISTRY
+from utils.path_utils import coerce_path_string
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +114,28 @@ def build_file_excerpt(repo_path: str, rel_path: str, head_lines: int = 25,
     lines = text.splitlines()
     head = lines[:head_lines]
     outline = []
-    pat = _re.compile(r"^\s*(def |class |DEFAULT|[A-Z_]{4,}\s*=)")
+    python_decl = _re.compile(r"^\s*(?:async\s+def|def|class)\s+\w+")
+    java_type_decl = _re.compile(
+        r"^\s*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed)\s+)*"
+        r"(?:class|interface|enum|record)\s+\w+"
+    )
+    java_method_decl = _re.compile(
+        r"^\s*(?:(?:public|protected|private|abstract|final|static|synchronized|native|default)\s+)+"
+        r"(?:<[^>]+>\s+)?[\w.$<>?\[\],]+\s+\w+\s*\([^;]*\)\s*(?:throws\s+[^{]+)?(?:\{|;)?\s*$"
+    )
+    java_constructor_decl = _re.compile(
+        r"^\s*(?:(?:public|protected|private)\s+)+\w+\s*\([^;]*\)\s*"
+        r"(?:throws\s+[^{]+)?(?:\{.*)?$"
+    )
+    constant_decl = _re.compile(r"^\s*[A-Z_][A-Z0-9_]{3,}\s*=")
     for i, line in enumerate(lines, 1):
-        if pat.match(line):
+        if (
+            python_decl.match(line)
+            or java_type_decl.match(line)
+            or java_method_decl.match(line)
+            or java_constructor_decl.match(line)
+            or constant_decl.match(line)
+        ):
             outline.append(f"L{i}: {line.strip()[:120]}")
             if len(outline) >= outline_cap:
                 break
@@ -141,17 +162,52 @@ Respond with the SAME complete JSON block (all fields).
 """
 
 
-def _normalize_suspicious_file_entry(entry) -> str | None:
-    """LLMs sometimes emit objects instead of plain path strings."""
-    if isinstance(entry, str):
-        s = entry.strip()
-        return s if s else None
-    if isinstance(entry, dict):
-        for key in ("file_path", "path", "filepath", "file"):
-            v = entry.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-    return None
+def _canonical_repo_path(path: str, repo_path: str = "") -> str | None:
+    """Normalize an LLM-produced path without allowing parent traversal."""
+    value = str(path or "").strip().strip("`\"'").replace("\\", "/")
+    if not value:
+        return None
+    if repo_path:
+        root = Path(repo_path).resolve()
+        try:
+            candidate = Path(value)
+            if candidate.is_absolute():
+                value = candidate.resolve().relative_to(root).as_posix()
+        except (OSError, ValueError):
+            return None
+    while value.startswith("./"):
+        value = value[2:]
+    value = value.lstrip("/")
+    normalized = os.path.normpath(value).replace("\\", "/")
+    if normalized in ("", ".", "..") or normalized.startswith("../"):
+        return None
+    return normalized
+
+
+def _normalize_suspicious_file_entry(entry, repo_path: str = "") -> str | None:
+    """Coerce an LLM file entry (string or dict) to a canonical repo-relative path."""
+    raw = coerce_path_string(entry)
+    if raw is None:
+        return None
+    return _canonical_repo_path(raw, repo_path)
+
+
+def _normalize_string_list(value, dict_keys: tuple[str, ...] = ()) -> list[str]:
+    """Coerce a lenient LLM field into a deduplicated list of strings."""
+    entries = value if isinstance(value, list) else [value] if value is not None else []
+    normalized: list[str] = []
+    for entry in entries:
+        candidate = entry
+        if isinstance(entry, dict):
+            candidate = next(
+                (entry.get(key) for key in dict_keys if entry.get(key)), None
+            )
+        if not isinstance(candidate, str):
+            continue
+        candidate = candidate.strip()
+        if candidate and candidate not in normalized:
+            normalized.append(candidate)
+    return normalized
 
 
 SYSTEM_PROMPT = """You are a Fault Comprehension Agent — an expert software debugger with deep understanding of software engineering principles and common bug patterns.
@@ -186,8 +242,8 @@ After your analysis, respond with a JSON block containing your findings:
   "bug_summary": "Brief but precise summary of what the bug is and its impact",
   "bug_type": "logic_error|runtime_error|api_misuse|configuration|regression|performance|security|other",
   "key_components": ["list of relevant modules/packages with versions if mentioned"],
-  "suspicious_files": ["list of SPECIFIC files to investigate with brief rationale for each"],
-  "suspicious_functions": ["list of SPECIFIC functions/methods to investigate with brief rationale for each"],
+  "suspicious_files": ["repository-relative/path.py"],
+  "suspicious_functions": ["Class.method"],
   "fault_hypothesis": "EXTREMELY DETAILED hypothesis about the root cause including: suspected file, function, line characteristics, and exact nature of the fault",
   "search_keywords": ["PRIORITIZED keywords for further investigation - put most specific terms first"],
   "hypothesis_confidence": 0.0
@@ -289,16 +345,22 @@ class ComprehensionAgent(BaseAgent):
         if max_iterations is None:
             max_iterations = config.comprehension_max_iterations
 
-        extraction_calls = 0
+        extraction_usage = {
+            "llm_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
         if config.enable_structured_bug_extraction:
-            context.structured_bug_info = self._extract_structured_bug_info(
+            context.structured_bug_info, extraction_usage = self._extract_structured_bug_info(
                 context.problem_statement
             )
-            extraction_calls = 1
 
         if not config.comprehension_single_shot:
             result = super().run(context, max_iterations)
-            result.num_llm_calls += extraction_calls
+            self._merge_usage(result, extraction_usage)
+            self._validate_result(result)
+            self._apply_patch_owner_challenge(result, context, config)
             return result
 
         shot, shot_messages = self._run_single_shot(context)
@@ -312,7 +374,8 @@ class ComprehensionAgent(BaseAgent):
             self._verify_shot(shot_messages, shot.explanation, shot, context)
             unstable = self._top_file(shot) != top1_before
         if shot is not None and not unstable and not self._needs_escalation(shot, config):
-            shot.num_llm_calls += extraction_calls
+            self._merge_usage(shot, extraction_usage)
+            self._apply_patch_owner_challenge(shot, context, config)
             return shot
 
         reason = (
@@ -325,7 +388,8 @@ class ComprehensionAgent(BaseAgent):
             f"escalating to tool loop (max {max_iterations} iterations)"
         )
         loop_result = super().run(context, max_iterations)
-        loop_result.num_llm_calls += extraction_calls
+        self._merge_usage(loop_result, extraction_usage)
+        self._validate_result(loop_result)
         if shot is not None:
             loop_result.num_llm_calls += shot.num_llm_calls
             loop_result.prompt_tokens += shot.prompt_tokens
@@ -338,7 +402,9 @@ class ComprehensionAgent(BaseAgent):
                 shot.prompt_tokens = loop_result.prompt_tokens
                 shot.completion_tokens = loop_result.completion_tokens
                 shot.total_tokens = loop_result.total_tokens
+                self._apply_patch_owner_challenge(shot, context, config)
                 return shot
+        self._apply_patch_owner_challenge(loop_result, context, config)
         return loop_result
 
     def _run_single_shot(
@@ -383,7 +449,10 @@ class ComprehensionAgent(BaseAgent):
 
     @staticmethod
     def _top_file(result: AgentResult) -> str | None:
-        for e in (result.output or {}).get("suspicious_files") or []:
+        raw_files = (result.output or {}).get("suspicious_files") or []
+        if not isinstance(raw_files, list):
+            raw_files = [raw_files]
+        for e in raw_files:
             p = _normalize_suspicious_file_entry(e)
             if p:
                 return p
@@ -396,8 +465,11 @@ class ComprehensionAgent(BaseAgent):
         from config import config
 
         files: list[str] = []
-        for e in (result.output or {}).get("suspicious_files") or []:
-            p = _normalize_suspicious_file_entry(e)
+        raw_files = (result.output or {}).get("suspicious_files") or []
+        if not isinstance(raw_files, list):
+            raw_files = [raw_files]
+        for e in raw_files:
+            p = _normalize_suspicious_file_entry(e, context.repo_path)
             if p and p not in files:
                 files.append(p)
             if len(files) >= config.comprehension_verify_files:
@@ -429,10 +501,10 @@ class ComprehensionAgent(BaseAgent):
         if not content.strip():
             return
         revised = self._parse_output(content)
-        if any(
-            _normalize_suspicious_file_entry(e)
-            for e in revised.get("suspicious_files") or []
-        ):
+        revised_files = revised.get("suspicious_files") or []
+        if not isinstance(revised_files, list):
+            revised_files = [revised_files]
+        if any(_normalize_suspicious_file_entry(e) for e in revised_files):
             result.output = revised
             result.explanation = content
             context.add_trace(self.name, "verify_shot_answer", content[:300])
@@ -443,7 +515,10 @@ class ComprehensionAgent(BaseAgent):
         explicitly unsure about its own hypothesis."""
         output = result.output or {}
         files = []
-        for e in output.get("suspicious_files") or []:
+        raw_files = output.get("suspicious_files") or []
+        if not isinstance(raw_files, list):
+            raw_files = [raw_files]
+        for e in raw_files:
             p = _normalize_suspicious_file_entry(e)
             if p:
                 files.append(p)
@@ -457,14 +532,43 @@ class ComprehensionAgent(BaseAgent):
             conf /= 100.0
         return conf < config.comprehension_escalation_conf
 
-    def _extract_structured_bug_info(self, problem_statement: str) -> dict:
+    @staticmethod
+    def _merge_usage(result: AgentResult, usage: dict) -> None:
+        result.num_llm_calls += usage.get("llm_calls", 0)
+        result.prompt_tokens += usage.get("prompt_tokens", 0)
+        result.completion_tokens += usage.get("completion_tokens", 0)
+        result.total_tokens += usage.get("total_tokens", 0)
+
+    @staticmethod
+    def _has_usable_output(output: dict) -> bool:
+        if not isinstance(output, dict):
+            return False
+        files = _normalize_string_list(
+            output.get("suspicious_files"),
+            ("file_path", "path", "filepath", "file"),
+        )
+        hypothesis = output.get("fault_hypothesis")
+        return bool(
+            files
+            or isinstance(hypothesis, str) and hypothesis.strip()
+            or isinstance(output.get("hypotheses"), list) and output["hypotheses"]
+        )
+
+    @classmethod
+    def _validate_result(cls, result: AgentResult) -> None:
+        if result.success and not cls._has_usable_output(result.output):
+            result.success = False
+            result.error = "Comprehension response contained no usable structured output"
+
+    def _extract_structured_bug_info(self, problem_statement: str) -> tuple[dict, dict]:
         """
         Single lightweight LLM call (no tools) to extract structured bug components.
         Returns dict with bug_phenomenon, bug_explanation, bug_traceback keys.
         Falls back to empty dict on any failure.
         """
         if not problem_statement:
-            return {}
+            return {}, {"llm_calls": 0, "prompt_tokens": 0,
+                        "completion_tokens": 0, "total_tokens": 0}
         truncated = problem_statement[:3000]
         extraction_prompt = (
             "Extract the following from this bug report. Be concise.\n\n"
@@ -478,21 +582,228 @@ class ComprehensionAgent(BaseAgent):
             response = self._call_llm([
                 {"role": "system", "content": "You are a bug report analyst. Return only valid JSON."},
                 {"role": "user", "content": extraction_prompt},
-            ])
+            ], use_tools=False)
+            api_usage = getattr(response, "usage", None)
+            usage = {
+                "llm_calls": 1,
+                "prompt_tokens": getattr(api_usage, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(api_usage, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(api_usage, "total_tokens", 0) or 0,
+            }
             content = response.choices[0].message.content or ""
             result = self._parse_output(content)
             if "bug_phenomenon" in result:
                 logger.debug(f"[ComprehensionAgent] Structured extraction: {result}")
-                return result
+                return result, usage
+            return {}, usage
         except Exception as exc:
             logger.debug(f"Structured bug extraction failed: {exc}")
-        return {}
+        return {}, {"llm_calls": 1, "prompt_tokens": 0,
+                    "completion_tokens": 0, "total_tokens": 0}
+
+    def _apply_patch_owner_challenge(
+        self, result: AgentResult, context: AgentContext, config
+    ) -> None:
+        """Challenge symptom-local candidates with likely patch owners.
+
+        This is intentionally a compact, tool-free counterfactual pass. Owner
+        paths are accepted only when they exist inside the checked-out repo, so
+        the pass can improve recall without injecting hallucinated candidates.
+        """
+        if (
+            not config.enable_comprehension_owner_challenge
+            or not result.success
+            or not self._has_usable_output(result.output)
+        ):
+            return
+
+        current_files = _normalize_string_list(
+            result.output.get("suspicious_files"),
+            ("file_path", "path", "filepath", "file"),
+        )
+        recent_evidence = "\n".join(
+            f"- {trace.get('action')}: {trace.get('result')}"
+            for trace in context.agent_traces[-20:]
+            if str(trace.get("action", "")).startswith("tool:")
+        )
+        prompt = f"""You are the counterfactual Patch-Owner Reviewer in a bug-localization system.
+
+The first debugger often selects where the symptom executes instead of the file a minimal fix
+would edit. Treat its proposed files as a hypothesis to FALSIFY, not an anchor. Independently
+reconstruct the operation that produces the wrong behavior, then identify the component that:
+- first consumes or normalizes the problematic value;
+- performs the last incorrect mutation before the symptom;
+- owns presentation of an exception when execution semantics are already correct.
+
+Consider these alternative ownership layers:
+- configuration/default normalization and registries;
+- exception presentation/reporting boundaries rather than the throw site;
+- protocol, lookup, field, serializer, compiler, or dispatcher that owns the invariant;
+- construction/canonicalization code rather than a downstream consumer.
+
+BUG REPORT:
+{context.problem_statement[:7000]}
+
+FIRST DEBUGGER OUTPUT:
+{str(result.output)[:7000]}
+
+RECENT CODE-EXPLORATION EVIDENCE:
+{recent_evidence[:10000] or '(none)'}
+
+REPOSITORY FILE LISTING:
+{context.repo_skeleton[:50000]}
+
+Return ONLY JSON:
+{{
+  "symptom_location_assessment": "why the original location is or is not the patch owner",
+  "owner_files": [
+    {{"path": "repository/relative/file.py", "owner_type": "configuration|presentation|protocol|dispatch|construction|other", "reason": "specific invariant owned here"}}
+  ],
+  "search_queries": ["exact code identifier that would reveal the owner"]
+}}
+
+Rules:
+1. Propose at most {config.comprehension_owner_max_files} owner files.
+   Propose at most {config.comprehension_owner_max_searches} precise search queries.
+2. Do not repeat the original files unless they truly own the invariant.
+3. Use only exact paths present in the repository listing.
+4. Prefer a different architectural layer; do not merely list adjacent callers.
+5. For exception bugs, distinguish raising/routing from rendering the final debug response.
+6. For ORM bugs, distinguish query representation from the lookup/field operation that consumes it.
+"""
+        try:
+            response = self._call_llm(
+                [
+                    {
+                        "role": "system",
+                        "content": "Audit patch ownership. Return valid JSON only.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                context,
+                use_tools=False,
+            )
+        except Exception as exc:
+            logger.warning(f"[ComprehensionAgent] patch-owner challenge failed: {exc}")
+            return
+
+        result.num_llm_calls += 1
+        usage = getattr(response, "usage", None)
+        if usage:
+            result.prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+            result.completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+            result.total_tokens += getattr(usage, "total_tokens", 0) or 0
+        content = response.choices[0].message.content or ""
+        audit = self._parse_output(content)
+        queries = _normalize_string_list(audit.get("search_queries"))[
+            : config.comprehension_owner_max_searches
+        ]
+        search_evidence = []
+        if queries:
+            from tools.code_search import code_search
+
+            for query in queries:
+                try:
+                    matches = code_search(
+                        query,
+                        repo_path=context.repo_path,
+                        max_results=12,
+                        context_lines=1,
+                        file_pattern=context.file_extension,
+                    )
+                except Exception as exc:
+                    logger.debug(f"Owner search failed for {query!r}: {exc}")
+                    continue
+                result.num_tool_calls += 1
+                if matches:
+                    rendered = "\n".join(match.to_str() for match in matches)
+                    search_evidence.append(f"QUERY {query!r}:\n{rendered}")
+
+        # The first pass plans independent searches. A compact second pass
+        # selects owners from concrete code hits, avoiding tree-only guesses.
+        if search_evidence:
+            evidence_prompt = f"""Select the actual patch-owner files using the retrieved code evidence.
+
+BUG REPORT:
+{context.problem_statement[:7000]}
+
+REJECTED/SYMPTOM FILES:
+{current_files}
+
+INITIAL OWNER AUDIT:
+{audit}
+
+CODE SEARCH EVIDENCE:
+{chr(10).join(search_evidence)[:30000]}
+
+Return ONLY JSON with the same owner_files schema. Choose at most
+{config.comprehension_owner_max_files} repository-relative paths. Prefer the file whose shown
+function consumes/normalizes the value or renders the final response, not a nearby caller.
+"""
+            try:
+                evidence_response = self._call_llm(
+                    [
+                        {
+                            "role": "system",
+                            "content": "Select patch owners from concrete evidence. JSON only.",
+                        },
+                        {"role": "user", "content": evidence_prompt},
+                    ],
+                    context,
+                    use_tools=False,
+                )
+                result.num_llm_calls += 1
+                evidence_usage = getattr(evidence_response, "usage", None)
+                if evidence_usage:
+                    result.prompt_tokens += (
+                        getattr(evidence_usage, "prompt_tokens", 0) or 0
+                    )
+                    result.completion_tokens += (
+                        getattr(evidence_usage, "completion_tokens", 0) or 0
+                    )
+                    result.total_tokens += getattr(evidence_usage, "total_tokens", 0) or 0
+                evidence_content = evidence_response.choices[0].message.content or ""
+                evidence_audit = self._parse_output(evidence_content)
+                if evidence_audit.get("owner_files"):
+                    audit["initial_owner_files"] = audit.get("owner_files", [])
+                    audit["owner_files"] = evidence_audit["owner_files"]
+                    audit["search_evidence"] = search_evidence
+            except Exception as exc:
+                logger.warning(
+                    f"[ComprehensionAgent] owner evidence synthesis failed: {exc}"
+                )
+
+        raw_owners = audit.get("owner_files") or []
+        if not isinstance(raw_owners, list):
+            raw_owners = [raw_owners]
+
+        owners: list[str] = []
+        root = Path(context.repo_path).resolve()
+        for entry in raw_owners:
+            path = _normalize_suspicious_file_entry(entry, context.repo_path)
+            if not path or path in current_files or path in owners:
+                continue
+            candidate = (root / path).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                owners.append(path)
+            if len(owners) >= config.comprehension_owner_max_files:
+                break
+
+        result.output["patch_owner_audit"] = audit
+        if owners:
+            result.output["suspicious_files"] = owners + current_files
+            result.output["patch_owner_files"] = owners
+            context.add_trace(self.name, "patch_owner_challenge", content[:300])
 
     def get_system_prompt(self, context: AgentContext) -> str:
         from config import config
 
         prompt = SYSTEM_PROMPT
-        if config.enable_hypothesis_loop:
+        if config.hypotheses_enabled:
             prompt += HYPOTHESES_PROMPT_ADDON.replace(
                 "{K}", str(max(3, min(config.hypothesis_k, 5)))
             )
@@ -631,22 +942,38 @@ class ComprehensionAgent(BaseAgent):
             files: list[str] = []
             if isinstance(raw, list):
                 for e in raw:
-                    p = _normalize_suspicious_file_entry(e)
+                    p = _normalize_suspicious_file_entry(e, context.repo_path)
                     if p and p not in files:
                         files.append(p)
-            elif isinstance(raw, str):
-                p = _normalize_suspicious_file_entry(raw)
+            elif isinstance(raw, (str, dict)):
+                p = _normalize_suspicious_file_entry(raw, context.repo_path)
                 if p:
                     files = [p]
             context.candidate_files = files
 
         if "suspicious_functions" in output:
-            context.candidate_methods = output["suspicious_functions"]
+            context.candidate_methods = _normalize_string_list(
+                output["suspicious_functions"],
+                ("function_name", "method_name", "name", "function", "method"),
+            )
 
         if "search_keywords" in output:
-            context.keywords.extend(output.get("search_keywords", []))
+            for keyword in _normalize_string_list(
+                output.get("search_keywords"), ("keyword", "term", "query")
+            ):
+                if keyword not in context.keywords:
+                    context.keywords.append(keyword)
 
         self._process_hypotheses(output, context)
+
+        # Hypothesis-loop merging ranks high-prior symptom hypotheses first.
+        # Preserve the counterfactual audit's contract: validated patch owners
+        # must remain ahead of symptom-local candidates after all merges.
+        owner_files = _normalize_string_list(output.get("patch_owner_files"))
+        if owner_files:
+            context.candidate_files = owner_files + [
+                path for path in context.candidate_files if path not in owner_files
+            ]
 
         logger.info(
             f"[ComprehensionAgent] Hypothesis: {context.fault_hypothesis[:200]}"
@@ -658,7 +985,7 @@ class ComprehensionAgent(BaseAgent):
         """E1: build the hypothesis tracker from comprehension output."""
         from config import config
 
-        if not config.enable_hypothesis_loop:
+        if not config.hypotheses_enabled:
             return
 
         from agents.hypothesis import HypothesisTracker, parse_hypotheses_from_llm

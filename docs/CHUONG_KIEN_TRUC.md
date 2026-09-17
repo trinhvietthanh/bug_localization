@@ -16,7 +16,7 @@ Hệ thống được tổ chức thành **năm lớp chức năng** (Hình 3.1)
 4. **Lớp tri thức** (RAG & CPG) — Qdrant vector store + Code Property Graph (Neo4j hoặc in-memory).
 5. **Lớp công cụ** (Tools) — 16 công cụ sandbox chuẩn OpenAI tool-format, chia sẻ cache LRU.
 
-Các tính năng mở rộng E1/E2/E3/H1 đều có công tắc cấu hình riêng, **mặc định tắt**, không thay đổi schema đầu ra nên bật/tắt độc lập — tạo cơ sở cho phần ablation (Chương 4).
+Các tính năng mở rộng E1/E2/E3 đều có công tắc cấu hình riêng, **mặc định tắt**, không thay đổi schema đầu ra nên bật/tắt độc lập — tạo cơ sở cho phần ablation (Chương 4).
 
 ---
 
@@ -63,7 +63,7 @@ C4Container
         Container(core, "Explorer Engine", "Python", "core/explorer.py — bộ lập lịch priority-queue\ncho E2, độc lập với LLM/tool")
         Container(rag, "RAG & Graph Engine", "Python", "Chunking, embedding, CPG builder\n(Python AST / Java regex), hop-distance API")
         Container(tools, "Tools Registry", "Python", "16 công cụ sandbox + LRU cache dùng chung")
-        Container(eval, "Evaluation", "Python", "Benchmarks, metrics Top-N/MRR/MAP,\nUnifiedScorer (10 tín hiệu), ListwiseReranker (E3)")
+        Container(eval, "Evaluation", "Python", "Benchmarks, metrics Top-N/MRR/MAP,\nUnifiedScorer (9 tín hiệu), ListwiseReranker (E3)")
 
         ContainerDb(vdb, "Vector DB", "Qdrant (local persist)", "Embedding các code chunk (jina-embeddings-v3)")
         ContainerDb(gdb, "Graph DB", "Neo4j (mặc định khi khả dụng)\n/ in-memory fallback", "Code Property Graph: hàm, lớp,\ncaller/callee, inheritance, import")
@@ -104,7 +104,7 @@ C4Component
 
     Container_Boundary(orch_b, "Orchestrator") {
         Component(ctx, "AgentContext", "dataclass", "Trạng thái dùng chung:\nbug_info, suspicious_files, hypotheses,\nstack_traces, suspicious_locations")
-        Component(us, "UnifiedScorer", "Python", "Hợp nhất 10 tín hiệu → điểm tổng")
+        Component(us, "UnifiedScorer", "Python", "Hợp nhất 9 tín hiệu → điểm tổng")
         Component(rf, "RankFusion (RRF)", "Python", "Đồng thuận 4 bảng xếp hạng,\n0 LLM call")
     }
 
@@ -113,7 +113,7 @@ C4Component
         Component(nav, "Navigation", "Agent", "Khám phá codebase tự do")
         Component(pnav, "PriorityNavigation [E2]", "Agent", "Khám phá qua priority-queue, fallback về Navigation")
         Component(ver, "Verification [E1]", "Agent", "Thu bằng chứng ủng hộ/bác bỏ giả thuyết")
-        Component(conf, "Confirmation", "Agent", "Xếp hạng, reflection, [H1] patch_duel")
+        Component(conf, "Confirmation", "Agent", "Xếp hạng và tạo feedback cho reflection")
         Component(ht, "HypothesisTracker [E1]", "Python", "Belief tracking log-odds thuần Python")
     }
 
@@ -148,7 +148,7 @@ C4Component
 
 Sơ đồ dưới đây mô tả hành trình của một bug report từ tiền xử lý đến kết quả xếp hạng cuối.
 
-Sơ đồ dưới vẽ đúng **cấu hình chuẩn / tối ưu** đã được xác nhận bằng thực nghiệm (Chương 4): E1 (giả thuyết cạnh tranh) + E2 (khám phá ưu tiên) + E3 (listwise rerank) bật, H1 (patch duel) và RRF consensus tắt (`SCORE_WEIGHT_CONSENSUS=0`, `ENABLE_PATCH_DUEL=false` — hai cơ chế này cho kết quả không có ý nghĩa thống kê trên n=300, §4.6). Vì cấu hình cố định tại thời điểm khởi chạy, các khối rẽ nhánh theo flag (`{...bật?}`) không còn xuất hiện; sơ đồ chỉ giữ lại **nhánh động thực sự phát sinh khi chạy** — vòng lặp reflection theo độ tin cậy. Một hệ quả kiến trúc quan trọng khi E2 bật: `VerificationAgent` (E1) bị bỏ qua hoàn toàn (`orchestrator.py:932`) vì Explorer đã tự gắn nhãn bằng chứng ngay trong bước `observe()` của mỗi action — không cần một tác tử xác minh riêng.
+Sơ đồ dưới vẽ đúng **cấu hình chuẩn / tối ưu** đã được xác nhận bằng thực nghiệm (Chương 4): E1 (giả thuyết cạnh tranh) + E2 (khám phá ưu tiên) + E3 (listwise rerank). Hai thử nghiệm Patch Duel và RRF consensus đã bị loại khỏi source chạy chính sau khi không cho cải thiện có ý nghĩa trên n=300; báo cáo và artifact lịch sử vẫn được giữ ở Chương 4. Vì cấu hình cố định tại thời điểm khởi chạy, các khối rẽ nhánh theo flag (`{...bật?}`) không còn xuất hiện; sơ đồ chỉ giữ lại **nhánh động thực sự phát sinh khi chạy** — vòng lặp reflection theo độ tin cậy. Một hệ quả kiến trúc quan trọng khi E2 bật: `VerificationAgent` (E1) bị bỏ qua hoàn toàn vì Explorer đã tự gắn nhãn bằng chứng ngay trong bước `observe()` của mỗi action — không cần một tác tử xác minh riêng.
 
 ```mermaid
 flowchart TD
@@ -184,7 +184,7 @@ flowchart TD
     end
 
     subgraph POST["Hậu xử lý"]
-        CTX5 --> US["UnifiedScorer\n10 tín hiệu (bao gồm hypothesis_support [E1])"]
+        CTX5 --> US["UnifiedScorer\n9 tín hiệu (bao gồm hypothesis_support [E1])"]
         US --> RR["ListwiseReranker [E3]\nnarrowing file→function + rerank top-10\npermutation-only, fail-open"]
         RR --> FV["File Validation\nnever-empty fallback"]
     end
@@ -243,7 +243,7 @@ sequenceDiagram
     L-->>CF: ranked_locations
     CF-->>O: confidence + ranking
 
-    O->>S: unified scoring (10 tín hiệu + RRF)
+    O->>S: unified scoring (9 tín hiệu)
     S-->>O: ranked_files
     O-->>U: kết quả
 ```
@@ -283,7 +283,7 @@ Các hằng số điều khiển dừng: `EARLY_SUCCESS` (8 finding có relevanc
 
 ### 3.4.3. Unified Scorer và hợp nhất đa tín hiệu
 
-Sau khi các tác tử chạy xong, `UnifiedScorer` (`evaluation/unified_scorer.py`) tính điểm tổng cho mỗi file ứng viên bằng tổng có trọng số của **10 tín hiệu**:
+Sau khi các tác tử chạy xong, `UnifiedScorer` (`evaluation/unified_scorer.py`) tính điểm tổng cho mỗi file ứng viên bằng tổng có trọng số của **9 tín hiệu**:
 
 | Tín hiệu | Trọng số mặc định | Ý nghĩa |
 |---|---|---|
@@ -300,10 +300,9 @@ Sau khi các tác tử chạy xong, `UnifiedScorer` (`evaluation/unified_scorer.
 
 Tín hiệu `test_file_penalty` (0.5) trừ điểm file test trừ khi lỗi rõ ràng trong test setup.
 
-### 3.4.4. Listwise Reranker (E3) và Patch Duel (H1)
+### 3.4.4. Listwise Reranker (E3)
 
 - **ListwiseReranker** (`evaluation/reranker.py`): dựng "evidence card" cho top-K file (chỉ mang tín hiệu định tính, **không** mang điểm tổng hay thứ hạng hiện tại để tránh anchoring), rồi một LLM call xếp lại top-K. Hoạt động **permutation-only** — không đổi thành viên pool, nên Top-10/recall bất biến theo thiết kế.
-- **Patch Duel** (`agents/confirmation.py`): một LLM call cuối, phác thảo patch cụ thể cho #1 và #2 (nhãn A/B theo alphabet, giấu thứ hạng), rồi chọn file patch thật sự sẽ sửa. Chỉ swap #1↔#2 khi B thắng, fail-open mọi lỗi.
 
 ---
 
@@ -351,7 +350,7 @@ flowchart LR
 
 ## 3.6. Cấu hình và khả năng mở rộng
 
-Toàn bộ cấu hình tập trung trong `config.py` dưới dạng dataclass đọc từ biến môi trường (`.env`), chia thành `LLMConfig`, `EmbeddingConfig`, `RAGConfig`, `Neo4jConfig`, `ScoringConfig` và các flag E1/E2/E3/H1. Bảng dưới liệt kê các công tắc mở rộng quan trọng.
+Toàn bộ cấu hình tập trung trong `config.py` dưới dạng dataclass đọc từ biến môi trường (`.env`), chia thành `LLMConfig`, `EmbeddingConfig`, `RAGConfig`, `Neo4jConfig`, `ScoringConfig` và các flag E1/E2/E3. Bảng dưới liệt kê các công tắc mở rộng quan trọng.
 
 | Flag | Mặc định | Tác dụng khi bật |
 |---|---|---|
@@ -361,8 +360,6 @@ Toàn bộ cấu hình tập trung trong `config.py` dưới dạng dataclass đ
 | `ENABLE_LISTWISE_RERANK` (E3) | false | Listwise rerank top-K |
 | `ENABLE_HIERARCHICAL_NARROWING` (E3) | false | Thu hẹp file → function |
 | `CONFIRMATION_MODE` | loop | loop / single / hybrid |
-| `ENABLE_PATCH_DUEL` (H1) | false | Duel #1 vs #2 |
-| `SCORE_WEIGHT_CONSENSUS` | 1.0 | Trọng số RRF consensus (0 = tắt) |
 
 **Khả năng mở rộng.** Thiết kế tách bạch (i) scheduler khỏi LLM (Explorer), (ii) tín hiệu xếp hạng khỏi tác tử (UnifiedScorer), và (iii) backend tri thức khỏi logic (Qdrant/Neo4j có thể thay thế) cho phép thêm tín hiệu, đổi backbone LLM, hoặc đổi graph backend mà không động tới luồng chính. Cơ chế retry hai lớp (SDK `max_retries` + wrapper backoff ở cấp call, và `INSTANCE_MAX_RETRIES` ở cấp instance) đảm bảo độ bền với lỗi mạng khi chạy benchmark quy mô lớn.
 
@@ -370,4 +367,4 @@ Toàn bộ cấu hình tập trung trong `config.py` dưới dạng dataclass đ
 
 ## 3.7. Kết luận chương
 
-Chương này đã trình bày kiến trúc hệ thống theo bốn góc nhìn bổ sung nhau: (1) **ngữ cảnh** định vị hệ thống trong môi trường bên ngoài, (2) **container** phân chia các đơn vị triển khai, (3) **component** bóc tách bên trong lớp tác tử, và (4) **luồng xử lý** theo pipeline và theo thời gian. Kiến trúc đa tác tử + RAG + CPG, cùng các cơ chế mở rộng E1/E2/E3/H1 có thể bật/tắt độc lập, tạo cơ sở cho phần đánh giá và ablation ở Chương 4. Đặc trưng thiết kế then chốt — tách scheduler khỏi LLM, hợp nhất đa tín hiệu ở hậu xử lý, fallback tự động cho graph backend — vừa đảm bảo khả năng lặp lại thí nghiệm, vừa để lại không gian mở rộng cho hướng nghiên cứu tiếp theo.
+Chương này đã trình bày kiến trúc hệ thống theo bốn góc nhìn bổ sung nhau: (1) **ngữ cảnh** định vị hệ thống trong môi trường bên ngoài, (2) **container** phân chia các đơn vị triển khai, (3) **component** bóc tách bên trong lớp tác tử, và (4) **luồng xử lý** theo pipeline và theo thời gian. Kiến trúc đa tác tử + RAG + CPG, cùng các cơ chế mở rộng E1/E2/E3 có thể bật/tắt độc lập, tạo cơ sở cho phần đánh giá và ablation ở Chương 4. Đặc trưng thiết kế then chốt — tách scheduler khỏi LLM, hợp nhất đa tín hiệu ở hậu xử lý, fallback tự động cho graph backend — vừa đảm bảo khả năng lặp lại thí nghiệm, vừa để lại không gian mở rộng cho hướng nghiên cứu tiếp theo.

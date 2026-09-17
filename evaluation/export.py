@@ -84,8 +84,10 @@ def export_per_instance_csv(
             predicted_methods = row_data.get("predicted_methods", [])
             ground_truth = row_data.get("ground_truth", [])
             ground_truth_methods = row_data.get("ground_truth_methods", [])
-            rr = row_data.get("rr", 0.0)
-            m_rr = row_data.get("method_rr", 0.0)
+            rr = row_data.get("rr", 0.0) or 0.0
+            # method_rr is explicitly None for instances with no GT method,
+            # so a dict default won't apply — coerce None to 0.0 before round().
+            m_rr = row_data.get("method_rr", 0.0) or 0.0
 
             # Compute file-level top-n hits
             gt_basenames = {Path(g).name for g in ground_truth}

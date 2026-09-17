@@ -30,8 +30,6 @@ class ScoringWeights:
     # E1: hypothesis support — score is the max posterior of surviving
     # hypotheses naming the file, or negative for falsified-only files
     hypothesis_support: float = 0.8
-    # RRF consensus across pipeline-stage rankings (normalized 0..1)
-    rank_consensus: float = 1.0
 
 
 @dataclass
@@ -49,7 +47,6 @@ class CandidateScore:
     method_boost: float = 0.0
     git_recency_score: float = 0.0
     hypothesis_score: float = 0.0
-    consensus_score: float = 0.0
     penalty: float = 0.0
     rank: int = 0
 
@@ -89,7 +86,6 @@ class UnifiedScorer:
         method_counts: dict[str, int] = None,
         git_recency_scores: dict[str, float] = None,
         hypothesis_scores: dict[str, float] = None,
-        consensus_scores: dict[str, float] = None,
     ) -> list[CandidateScore]:
         """
         Score all candidates and return sorted by total score.
@@ -123,7 +119,6 @@ class UnifiedScorer:
         method_counts = method_counts or {}
         git_recency_scores = dict(git_recency_scores) if git_recency_scores else None
         hypothesis_scores = hypothesis_scores or {}
-        consensus_scores = consensus_scores or {}
 
         scores = []
 
@@ -144,7 +139,6 @@ class UnifiedScorer:
                 method_count=method_counts.get(file_path, 0),
                 git_recency=recency,
                 hypothesis_score=hypothesis_scores.get(file_path, 0.0),
-                consensus_score=consensus_scores.get(file_path, 0.0),
             )
             scores.append(score)
 
@@ -167,7 +161,6 @@ class UnifiedScorer:
         method_count: int,
         git_recency: float = 0.0,
         hypothesis_score: float = 0.0,
-        consensus_score: float = 0.0,
     ) -> CandidateScore:
         """Score a single candidate file."""
         score = CandidateScore(file_path=file_path)
@@ -206,9 +199,6 @@ class UnifiedScorer:
             # actively demoted (the one signal that can lower a confident miss)
             score.hypothesis_score = hypothesis_score * w.hypothesis_support
 
-        if consensus_score > 0:
-            score.consensus_score = consensus_score * w.rank_consensus
-
         if self._is_test_file(file_path):
             score.penalty = w.test_file_penalty
 
@@ -222,7 +212,6 @@ class UnifiedScorer:
             + score.method_boost
             + score.git_recency_score
             + score.hypothesis_score
-            + score.consensus_score
             - score.penalty
         )
 
@@ -353,5 +342,4 @@ def extract_method_counts_from_locations(
         if file_path:
             counts[file_path] += 1
     return dict(counts)
-
 

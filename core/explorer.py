@@ -127,6 +127,59 @@ class ExplorationFrontier:
         )
 
 
+class SharedFrontier(ExplorationFrontier):
+    """
+    Frontier for MACS competitive scouts: a key pruned on the shared board is
+    treated exactly like an already-visited key, so a cluster ruled out by one
+    scout (falsified hypothesis, or repeated low relevance) is dropped from
+    every scout's queue without changing PriorityExplorer's loop.
+    """
+
+    def __init__(self, board, scout_id: str = ""):
+        super().__init__()
+        self._board = board
+        self.scout_id = scout_id
+
+    def _blocked(self, action: ExplorationAction) -> bool:
+        return self._board.is_pruned(action.key())
+
+    def push(self, action: ExplorationAction) -> bool:
+        if self._blocked(action):
+            return False
+        return super().push(action)
+
+    def pop(self) -> ExplorationAction | None:
+        while True:
+            action = super().pop()
+            if action is None:
+                return None
+            if self._blocked(action):
+                continue  # pruned by another scout after being queued
+            return action
+
+    def peek_priority(self) -> float | None:
+        while self._heap:
+            neg_priority, _, action = self._heap[0]
+            key = action.key()
+            if (
+                key in self.visited
+                or self._best_priority.get(key) != -neg_priority
+                or self._board.is_pruned(key)
+            ):
+                heapq.heappop(self._heap)
+                continue
+            return -neg_priority
+        return None
+
+    def __len__(self) -> int:
+        return sum(
+            1 for neg, _, a in self._heap
+            if a.key() not in self.visited
+            and self._best_priority.get(a.key()) == -neg
+            and not self._board.is_pruned(a.key())
+        )
+
+
 class PriorityExplorer:
     """
     Owns one exploration run: budget, termination, finding assembly.
@@ -159,9 +212,7 @@ class PriorityExplorer:
         self.w_graph = w_graph
         self.w_signal = w_signal
         self.max_depth = max_depth
-        # file → hop distance from anchors; missing = unreachable (neutral)
         self.graph_distances = graph_distances or {}
-        # target → provenance prior; missing = PRIOR_DEFAULT
         self.static_priors = static_priors or {}
         self.frontier = frontier or ExplorationFrontier()
         self.findings: list[Observation] = []

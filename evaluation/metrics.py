@@ -7,6 +7,8 @@ import logging
 import re
 from typing import Any, Optional
 
+from utils.path_utils import coerce_path_string
+
 logger = logging.getLogger(__name__)
 
 
@@ -323,26 +325,8 @@ def normalize_d4j_ground_truth_methods(raw_methods: list[str]) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 def _coerce_path_string(path: Any) -> Optional[str]:
-    """
-    Turn a metric input into a file path string.
-
-    Predictions sometimes carry dict-shaped entries (e.g. LLM JSON with
-    ``file_path``) while benchmarks use plain strings.
-    """
-    if path is None:
-        return None
-    if isinstance(path, str):
-        s = path.strip()
-        return s if s else None
-    if isinstance(path, dict):
-        for key in ("file_path", "path", "filepath", "file"):
-            v = path.get(key)
-            if isinstance(v, str):
-                s = v.strip()
-                if s:
-                    return s
-        return None
-    return None
+    """Delegate to shared utils — kept for backward compatibility."""
+    return coerce_path_string(path)
 
 
 _SOURCE_ROOT_PREFIXES = (

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Tóm tắt luận văn — 1 trang</title>
+<style>
+  @page { size: A4; margin: 9mm 11mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'DejaVu Sans', 'Noto Sans', sans-serif;
+    color: #1a1a2e;
+    font-size: 8.6pt;
+    line-height: 1.32;
+    margin: 0;
+  }
+  h1 {
+    font-size: 13.5pt;
+    color: #0D47A1;
+    border-bottom: 2.5px solid #EF6C00;
+    padding-bottom: 3px;
+    margin: 0 0 4px 0;
+  }
+  .meta { font-size: 8pt; color: #546E7A; margin-bottom: 7px; }
+  h2 {
+    font-size: 9.6pt;
+    color: #0D47A1;
+    background: #E3F2FD;
+    padding: 2px 7px;
+    border-left: 3px solid #1565C0;
+    margin: 8px 0 3px 0;
+  }
+  p { margin: 2px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 8.2pt; margin: 2px 0; }
+  th { background: #1565C0; color: #fff; padding: 2px 5px; text-align: left; font-weight: bold; }
+  td { padding: 2px 5px; border-bottom: 1px solid #ECEFF1; }
+  tr:nth-child(even) td { background: #F5F9FF; }
+  code { background: #ECEFF1; padding: 0 3px; border-radius: 3px; color: #C62828; font-size: 7.8pt; }
+  strong { color: #0D47A1; }
+  ul { margin: 2px 0; padding-left: 16px; }
+  li { margin: 1px 0; }
+  .two { display: flex; gap: 14px; }
+  .two > div { flex: 1; }
+  .claim {
+    background: #E8F5E9; border-left: 3px solid #2E7D32; padding: 4px 8px; margin: 3px 0;
+  }
+  .neg { background: #FFF3E0; border-left: 3px solid #EF6C00; padding: 3px 8px; margin: 3px 0; font-size: 8.2pt; }
+  .arch {
+    background: #F5F5F5; border: 1px solid #E0E0E0; border-radius: 4px;
+    padding: 3px 7px; margin: 2px 0; font-size: 8.1pt; text-align: center;
+  }
+  .foot { font-size: 7.2pt; color: #90A4AE; margin-top: 6px; border-top: 1px solid #ECEFF1; padding-top: 3px; }
+</style>
+</head>
+<body>
+
+<h1>Định vị lỗi mã nguồn bằng Hệ đa tác tử LLM + RAG + Code Property Graph</h1>
+<div class="meta"><b>Tác giả:</b> … &nbsp;·&nbsp; <b>GVHD:</b> … &nbsp;·&nbsp; <b>Luận văn 2026</b> &nbsp;·&nbsp; <b>Benchmark:</b> SWE-bench Lite (n=300) &nbsp;·&nbsp; <b>Backbone:</b> qwen-plus</div>
+
+<h2>Bài toán &amp; kiến trúc</h2>
+<p>Cho <b>bug report</b> (ngôn ngữ tự nhiên) + <b>mã nguồn</b> → tìm <b>file/method chứa lỗi</b>, xếp hạng. Thách thức: report mơ hồ; lỗi thường <b>không</b> ở file được nhắc mà lan truyền qua <b>chuỗi gọi hàm</b>.</p>
+<div class="arch">Bug Report → <b>Comprehension</b> (sinh giả thuyết) → <b>PriorityNavigation</b> (khám phá heap) → <b>Confirmation</b> (xác nhận + xếp hạng) → <b>UnifiedScorer</b> (10 tín hiệu) → <b>ListwiseRerank</b> → Ranked files</div>
+<p style="font-size:8.1pt"><b>Triết lý thiết kế:</b> tách phần <i>xác định</i> (Python, reproducible) khỏi phần <i>hiểu</i> (LLM, đắt). Cấu hình chuẩn: <b>E1+E2+E3 bật</b>; Patch Duel (H1) &amp; RRF consensus <b>tắt</b>.</p>
+
+<h2>3 đóng góp phương pháp (bật/tắt độc lập → ablation nghiêm ngặt)</h2>
+<div class="two">
+  <div>
+    <ul>
+      <li><b>E1 — Vòng lặp giả thuyết cạnh tranh:</b> sinh K=4 hypothesis, belief-tracking log-odds thuần Python; LLM <i>chỉ</i> gắn nhãn bằng chứng.</li>
+      <li><b>E2 — Khám phá ưu tiên:</b> heap scheduler tách khỏi LLM (chỉ chấm điểm); <b>context O(1)</b>/bước, không tích lũy token.</li>
+    </ul>
+  </div>
+  <div>
+    <ul>
+      <li><b>E3 — Listwise rerank:</b> thu hẹp file→function, hoán vị top-K, permutation-only (recall bất biến), fail-open.</li>
+      <li><b>Code Property Graph:</b> AST + quan hệ gọi/kế thừa/import; anchor matching + BFS → định vị file <b>không</b> được nhắc.</li>
+    </ul>
+  </div>
+</div>
+
+<h2>Kết quả chính — SWE-bench Lite, n=300</h2>
+<table>
+  <tr><th>Hệ thống</th><th>Top-1</th><th>Top-3</th><th>Top-5</th><th>MRR</th><th>calls/inst</th></tr>
+  <tr><td>Bare-LLM (1 call, cô lập)</td><td>64.0</td><td>83.7</td><td>87.0</td><td>0.738</td><td>1</td></tr>
+  <tr><td><b>Đề xuất (E1+E2+E3)</b></td><td><b>78.0</b></td><td><b>87.3</b></td><td><b>89.3</b></td><td><b>0.829</b></td><td>~34.7</td></tr>
+  <tr><td colspan="6" style="font-size:7.8pt;color:#546E7A"><i>So SOTA cùng benchmark: LocAgent (Claude-3.5) 77.7 · BLAgent (GPT-OSS-120B) 78.6 · Agentless (GPT-4o) 63.0 · CoSIL (Qwen2.5-32B) 61.3</i></td></tr>
+</table>
+
+<div class="claim">
+  <b>Claim cốt lõi (paired McNemar, n=300):</b> <b>+14 điểm Top-1</b> (59 thắng / 17 thua), <b>p = 1.4 × 10⁻⁶</b> — ý nghĩa rất mạnh. Top-5 không ý nghĩa (p=0.28): bare-LLM đã "nhớ" repo phổ biến. <b>Top-1 ngang SOTA</b> dù backbone qwen-plus yếu hơn Claude/GPT-OSS.
+</div>
+
+<div class="neg">
+  <b>Ablation (n=50, 6 thí nghiệm):</b> mọi cố gắng <b>nén vòng lặp agent</b> (single-shot, hybrid) đều giảm <b>Top-1 5–10đ</b> dù Top-3/5 giữ. ⇒ <b>Vòng lặp agent = cơ chế chuyên biệt cho Top-1, không thay bằng single-pass.</b>
+  &nbsp;|&nbsp; <b>Negative result:</b> RRF + Patch Duel NULL trên n=300 (−1.7đ, p=0.55) → giữ tắt.
+</div>
+
+<h2>Hạn chế &amp; kết luận</h2>
+<div class="two">
+  <div>
+    <b>Threats:</b> memorization benchmark public (bare = cận trên suy luận); 300 inst đầu chưa random; đơn model qwen-plus. Headroom: <b>tầng recall</b> (+10đ), <b>phân định tầng liền kề</b> (+7đ, 21 case rank-2).
+  </div>
+  <div>
+    <div class="claim" style="margin:0"><b>Kết luận:</b> Hệ đa tác tử + RAG + CPG tạo ra <b>giá trị định vị thực sự, có ý nghĩa thống kê mạnh</b> so với bare-LLM; vòng lặp agent là cơ chế <b>không thể nén</b> cho Top-1 discrimination.</div>
+  </div>
+</div>
+
+<div class="foot">Chi tiết: <code>docs/RESULTS_SUMMARY.md</code>, <code>docs/CHUONG_KIEN_TRUC.md</code>, <code>docs/BARE_LLM_BASELINE_REPORT.md</code> · Dữ liệu thô: <code>results/swebench_300_e123_qwen.json</code>, <code>results/cross_model/bare_qwen_300_final.json</code></div>
+
+</body>
+</html>

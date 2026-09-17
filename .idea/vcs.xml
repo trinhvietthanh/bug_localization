@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/repos/mwaskom__seaborn" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/repos/pallets__flask" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/repos/pylint-dev__pylint" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/astropy__astropy/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/django__django/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/matplotlib__matplotlib/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/mwaskom__seaborn/mwaskom__seaborn-3010" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/mwaskom__seaborn/mwaskom__seaborn-3190" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/mwaskom__seaborn/mwaskom__seaborn-3407" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/mwaskom__seaborn/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pallets__flask/pallets__flask-4992" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pallets__flask/pallets__flask-5063" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pallets__flask/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/psf__requests/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pydata__xarray/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pylint-dev__pylint/pylint-dev__pylint-7114" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pylint-dev__pylint/pylint-dev__pylint-7228" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pylint-dev__pylint/pylint-dev__pylint-7993" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pylint-dev__pylint/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/pytest-dev__pytest/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/scikit-learn__scikit-learn/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/repo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-10137" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-10614" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-10819" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11109" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11192" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11266" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11311" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11312" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11316" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11445" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11489" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11502" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11503" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11510" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11544" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/data/swebench_checkouts/sphinx-doc__sphinx/sphinx-doc__sphinx-11550" vcs="Git" />
+  </component>
+</project>

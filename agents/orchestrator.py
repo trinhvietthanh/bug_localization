@@ -91,7 +91,11 @@ class Orchestrator:
 
         # Initialize agents
         self.comprehension_agent = ComprehensionAgent()
-        if config.enable_priority_exploration:
+        if config.enable_competitive_scouting:
+            from agents.competitive_scouting import CompetitiveScoutingAgent
+
+            self.navigation_agent = CompetitiveScoutingAgent()
+        elif config.enable_priority_exploration:
             from agents.priority_navigation import PriorityNavigationAgent
 
             self.navigation_agent = PriorityNavigationAgent()
@@ -113,35 +117,11 @@ class Orchestrator:
         reflection_conf_threshold: float | None = None,
         temperature_override: float | None = None,
     ) -> LocalizationResult:
-        """
-        Run the full bug localization pipeline.
-
-        Args:
-            bug_instance: The bug instance to localize
-            repo_path: Path to the repository (if already cloned)
-            verbose: Whether to print detailed output
-
-        Returns:
-            LocalizationResult with ranked suspicious locations
-        """
+        """Run the full bug localization pipeline: Comprehension → Navigation → Confirmation."""
         start_time = time.time()
         result = LocalizationResult(instance_id=bug_instance.instance_id)
+        rmr, rct = self._resolve_reflection_params(reflection_max_rounds, reflection_conf_threshold)
 
-        rmr = (
-            config.reflection_max_rounds
-            if reflection_max_rounds is None
-            else reflection_max_rounds
-        )
-        rct = (
-            config.reflection_conf_threshold
-            if reflection_conf_threshold is None
-            else reflection_conf_threshold
-        )
-        rmr = max(0, min(int(rmr), 2))
-
-        # Caches cleared externally or handled by LRU in a thread-safe manner
-
-        # Step 0: Preprocess bug report
         if verbose:
             console.print(
                 Panel(
@@ -153,7 +133,6 @@ class Orchestrator:
 
         processed = self.preprocessor.process(bug_instance)
 
-        # Checkout repo if needed
         if repo_path is None:
             try:
                 repo_path = self.preprocessor.checkout_repo(bug_instance)
@@ -163,11 +142,51 @@ class Orchestrator:
                 result.explanation = f"Failed to checkout repo: {e}"
                 return result
 
-        # Detect Java by scanning the checked-out repository for .java files.
-        # This avoids a hardcoded project-name list and works for any Java repo.
+        context = self._prepare_context(bug_instance, repo_path, processed, temperature_override)
+        graph_future, graph_cache_key = self._start_graph_build(repo_path, context, verbose)
+
+        self._run_phase1(result, context, verbose)
+
+        self._collect_graph(graph_future, graph_cache_key, context, verbose)
+
+        conf_result = self._run_phase2_3_loop(result, context, rmr, rct, verbose)
+
+        self._finalize_result(result, context, conf_result, processed, repo_path, verbose)
+
+        result.total_time = time.time() - start_time
+        if verbose:
+            console.print(
+                f"\n⏱️  Total time: {result.total_time:.1f}s | "
+                f"LLM calls: {result.total_llm_calls} | "
+                f"Tool calls: {result.total_tool_calls} | "
+                f"Tokens: {result.total_prompt_tokens:,} prompt / "
+                f"{result.total_completion_tokens:,} completion / "
+                f"{result.total_tokens:,} total"
+            )
+        return result
+
+    @staticmethod
+    def _resolve_reflection_params(
+        reflection_max_rounds: int | None,
+        reflection_conf_threshold: float | None,
+    ) -> tuple[int, float]:
+        """Resolve reflection parameters from args or global config, clamp rounds to [0,2]."""
+        rmr = config.reflection_max_rounds if reflection_max_rounds is None else reflection_max_rounds
+        rct = config.reflection_conf_threshold if reflection_conf_threshold is None else reflection_conf_threshold
+        return max(0, min(int(rmr), 2)), rct
+
+    def _prepare_context(
+        self,
+        bug_instance: BugInstance,
+        repo_path: str,
+        processed,
+        temperature_override: float | None,
+    ) -> AgentContext:
+        """Build AgentContext from a preprocessed bug instance."""
+        import re as _re
+
         is_java = self._detect_java_repo(repo_path)
 
-        # Detect source root (old Ant layout uses "source/", Maven uses "src/main/java/")
         source_root = ""
         if is_java:
             if os.path.isdir(os.path.join(repo_path, "source")):
@@ -177,30 +196,23 @@ class Orchestrator:
             elif os.path.isdir(os.path.join(repo_path, "src")):
                 source_root = "src"
 
-        # Extract candidate files from failing test class names
+        # Derive candidate files from test class names in the bug report
         # Pattern: org.jfree.data.time.junit.WeekTests -> source/org/jfree/data/time/Week.java
         test_derived_candidates: list[str] = []
         if is_java and source_root:
-            import re as _re
-            # Match fully-qualified test class names
             test_patterns = _re.findall(
                 r'((?:[\w]+\.)+)(junit\.|test\.|tests\.)?(\w+Tests?)\b',
                 bug_instance.problem_statement,
             )
             for pre, _, cls in test_patterns:
-                # Strip trailing "Tests" or "Test" to get source class
                 src_cls = _re.sub(r'Tests?$', '', cls)
                 if not src_cls or src_cls == cls:
                     continue
-                # Build package path; strip trailing "junit." or similar from pre
-                pkg = pre.rstrip('.')
-                pkg = _re.sub(r'\.(junit|test|tests)$', '', pkg, flags=_re.IGNORECASE)
-                pkg_path = pkg.replace('.', '/')
-                candidate = f"{source_root}/{pkg_path}/{src_cls}.java"
+                pkg = _re.sub(r'\.(junit|test|tests)$', '', pre.rstrip('.'), flags=_re.IGNORECASE)
+                candidate = f"{source_root}/{pkg.replace('.', '/')}/{src_cls}.java"
                 if candidate not in test_derived_candidates:
                     test_derived_candidates.append(candidate)
 
-        # Build shared context
         hint_sources = list(processed.mentioned_files) + list(processed.keywords[:15])
         repo_skeleton = ""
         if config.enable_repo_skeleton:
@@ -210,22 +222,19 @@ class Orchestrator:
                 max_files=config.repo_skeleton_max_files,
                 priority_hints=hint_sources,
             )
-        stack_trace_files = self._extract_stack_trace_files(
-            processed.stack_traces, repo_path
-        )
-        # Log analysis: seed candidate_methods with methods seen in stack traces
+
+        stack_trace_files = self._extract_stack_trace_files(processed.stack_traces, repo_path)
         seed_methods = list(processed.stack_trace_methods)
 
-        # Merge drain3 search terms into keywords (high priority)
+        # Drain3 log terms take highest priority in keyword list
         if processed.log_parse_result and processed.log_parse_result.search_terms:
-            drain_terms = processed.log_parse_result.search_terms
             kw_set = set(processed.keywords)
-            for t in drain_terms:
+            for t in processed.log_parse_result.search_terms:
                 if t not in kw_set:
                     processed.keywords.insert(0, t)
                     kw_set.add(t)
 
-        context = AgentContext(
+        return AgentContext(
             instance_id=bug_instance.instance_id,
             repo_id=self._extract_project_name(repo_path),
             problem_statement=bug_instance.problem_statement,
@@ -241,47 +250,70 @@ class Orchestrator:
             repo_skeleton=repo_skeleton,
             temperature_override=temperature_override,
             stack_trace_files=stack_trace_files,
-            # Pre-seed candidate_methods from log stack traces
             candidate_methods=seed_methods,
             source_root=source_root,
             test_derived_candidates=test_derived_candidates,
             log_parse_result=processed.log_parse_result,
         )
 
-        # Build Code Property Graph in background (ready by Phase 2)
-        graph_future: Future | None = None
-        language = "java" if is_java else "python"
+    def _start_graph_build(
+        self, repo_path: str, context: AgentContext, verbose: bool
+    ) -> tuple[Future | None, str]:
+        """Start CPG build in a background thread; inject cached graph if available."""
+        language = context.language
         graph_cache_key = self._repo_cache_key(repo_path, language)
         cached = self._get_cached_graph(graph_cache_key)
-        if config.enable_graph_rag and cached is not None:
+
+        if not config.enable_graph_rag:
+            return None, graph_cache_key
+
+        if cached is not None:
             if verbose:
                 console.print(f"  ♻️  Reusing cached graph (key={graph_cache_key[:60]}...)")
             context.graph_retriever = cached
-        elif config.enable_graph_rag:
-            executor = ThreadPoolExecutor(max_workers=1)
-            graph_future = executor.submit(
-                self._build_graph, repo_path, verbose, graph_cache_key
-            )
-            executor.shutdown(wait=False)
+            return None, graph_cache_key
 
-        # === Phase 1: Fault Comprehension ===
+        executor = ThreadPoolExecutor(max_workers=1)
+        graph_future = executor.submit(self._build_graph, repo_path, verbose, graph_cache_key)
+        executor.shutdown(wait=False)
+        return graph_future, graph_cache_key
+
+    def _collect_graph(
+        self,
+        graph_future: Future | None,
+        graph_cache_key: str,
+        context: AgentContext,
+        verbose: bool,
+    ) -> None:
+        """Block until CPG build completes and inject into context; fail open."""
+        if graph_future is None:
+            return
+        try:
+            graph_retriever = graph_future.result(timeout=300)
+            context.graph_retriever = graph_retriever
+            self._set_cached_graph(graph_cache_key, graph_retriever)
+            if verbose:
+                stats = graph_retriever.graph.stats()
+                console.print(
+                    f"  📊 Graph RAG ready: {stats['total_nodes']} nodes, "
+                    f"{stats['total_edges']} edges"
+                )
+        except Exception as e:
+            import traceback
+            logger.warning(f"Graph RAG build failed, continuing without it: {type(e).__name__}: {e}")
+            logger.debug(f"Graph RAG traceback:\n{traceback.format_exc()}")
+            if verbose:
+                console.print(f"  ⚠️  Graph RAG unavailable: {type(e).__name__}: {e}")
+
+    def _run_phase1(
+        self, result: LocalizationResult, context: AgentContext, verbose: bool
+    ) -> None:
+        """Phase 1 — Fault Comprehension: analyze bug report and form hypothesis."""
         if verbose:
             console.print("\n[bold cyan]Phase 1: Fault Comprehension[/bold cyan]")
 
         comp_result = self.comprehension_agent.run(context)
-        result.agent_results["comprehension"] = {
-            "success": comp_result.success,
-            "llm_calls": comp_result.num_llm_calls,
-            "tool_calls": comp_result.num_tool_calls,
-            "prompt_tokens": comp_result.prompt_tokens,
-            "completion_tokens": comp_result.completion_tokens,
-            "total_tokens": comp_result.total_tokens,
-        }
-        result.total_llm_calls += comp_result.num_llm_calls
-        result.total_tool_calls += comp_result.num_tool_calls
-        result.total_prompt_tokens += comp_result.prompt_tokens
-        result.total_completion_tokens += comp_result.completion_tokens
-        result.total_tokens += comp_result.total_tokens
+        self._accumulate_agent_stats(result, comp_result, "comprehension")
 
         if comp_result.success:
             self.comprehension_agent.process_result(comp_result, context)
@@ -292,104 +324,54 @@ class Orchestrator:
                     if f not in promoted:
                         promoted.append(f)
                 context.candidate_files = promoted
-            # Snapshot for RRF consensus — later phases mutate candidate_files
-            context.comprehension_candidates = list(context.candidate_files)
             if verbose:
                 console.print(f"  ✅ Hypothesis: {context.fault_hypothesis[:200]}")
                 console.print(f"  📂 Candidate files: {context.candidate_files}")
                 if context.stack_trace_files:
-                    console.print(
-                        f"  🔺 Stack trace boosted: {context.stack_trace_files}"
-                    )
+                    console.print(f"  🔺 Stack trace boosted: {context.stack_trace_files}")
         else:
             logger.warning("Comprehension agent failed, continuing with defaults")
             if verbose:
                 console.print(f"  ❌ Failed: {comp_result.error}")
 
-        # Collect graph from background build (blocks only if not yet done)
-        if graph_future is not None:
-            try:
-                graph_retriever = graph_future.result(timeout=300)
-                context.graph_retriever = graph_retriever
-                # Cache using the key so future instances with same commit reuse it
-                self._set_cached_graph(graph_cache_key, graph_retriever)
-                if verbose:
-                    stats = graph_retriever.graph.stats()
-                    console.print(
-                        f"  📊 Graph RAG ready: {stats['total_nodes']} nodes, "
-                        f"{stats['total_edges']} edges"
-                    )
-            except Exception as e:
-                import traceback
-
-                logger.warning(
-                    f"Graph RAG build failed, continuing without it: "
-                    f"{type(e).__name__}: {e}"
-                )
-                logger.debug(f"Graph RAG traceback:\n{traceback.format_exc()}")
-                if verbose:
-                    console.print(
-                        f"  ⚠️  Graph RAG unavailable: {type(e).__name__}: {e}"
-                    )
-
+    def _run_phase2_3_loop(
+        self,
+        result: LocalizationResult,
+        context: AgentContext,
+        rmr: int,
+        rct: float,
+        verbose: bool,
+    ) -> AgentResult | None:
+        """Phase 2+3 loop — Navigation then Confirmation, with optional reflection rounds."""
         conf_result = None
-        rounds = max(0, rmr) + 1
+        rounds = rmr + 1
+
         for round_idx in range(rounds):
             if verbose:
-                phase_label = "Phase 2: Codebase Navigation"
-                if round_idx > 0:
-                    phase_label = f"Phase 2 (Reflection Round {round_idx + 1}): Codebase Navigation"
-                console.print(f"\n[bold cyan]{phase_label}[/bold cyan]")
+                label = "Phase 2: Codebase Navigation" if round_idx == 0 \
+                    else f"Phase 2 (Reflection Round {round_idx + 1}): Codebase Navigation"
+                console.print(f"\n[bold cyan]{label}[/bold cyan]")
 
             nav_result = self.navigation_agent.run(context)
-            result.agent_results[f"navigation_round_{round_idx + 1}"] = {
-                "success": nav_result.success,
-                "llm_calls": nav_result.num_llm_calls,
-                "tool_calls": nav_result.num_tool_calls,
-                "prompt_tokens": nav_result.prompt_tokens,
-                "completion_tokens": nav_result.completion_tokens,
-                "total_tokens": nav_result.total_tokens,
-            }
-            result.total_llm_calls += nav_result.num_llm_calls
-            result.total_tool_calls += nav_result.num_tool_calls
-            result.total_prompt_tokens += nav_result.prompt_tokens
-            result.total_completion_tokens += nav_result.completion_tokens
-            result.total_tokens += nav_result.total_tokens
+            self._accumulate_agent_stats(result, nav_result, f"navigation_round_{round_idx + 1}")
 
             if nav_result.success:
                 self.navigation_agent.process_result(nav_result, context)
                 if verbose:
-                    console.print(
-                        f"  ✅ Found {len(context.candidate_files)} candidate files"
-                    )
+                    console.print(f"  ✅ Found {len(context.candidate_files)} candidate files")
             else:
                 logger.warning("Navigation agent failed")
                 if verbose:
                     console.print(f"  ❌ Failed: {nav_result.error}")
 
-            # E1: verify competing hypotheses once, before the first Confirmation
             if round_idx == 0:
                 self._run_verification_stage(result, context, verbose)
 
             if verbose:
-                console.print(
-                    f"  Candidate Files before validation: {context.candidate_files}"
-                )
+                console.print(f"  Candidate Files before validation: {context.candidate_files}")
 
             conf_result = self.confirmation_agent.run(context)
-            result.agent_results[f"confirmation_round_{round_idx + 1}"] = {
-                "success": conf_result.success,
-                "llm_calls": conf_result.num_llm_calls,
-                "tool_calls": conf_result.num_tool_calls,
-                "prompt_tokens": conf_result.prompt_tokens,
-                "completion_tokens": conf_result.completion_tokens,
-                "total_tokens": conf_result.total_tokens,
-            }
-            result.total_llm_calls += conf_result.num_llm_calls
-            result.total_tool_calls += conf_result.num_tool_calls
-            result.total_prompt_tokens += conf_result.prompt_tokens
-            result.total_completion_tokens += conf_result.completion_tokens
-            result.total_tokens += conf_result.total_tokens
+            self._accumulate_agent_stats(result, conf_result, f"confirmation_round_{round_idx + 1}")
 
             if not conf_result.success:
                 continue
@@ -398,16 +380,12 @@ class Orchestrator:
             top_conf = self._top_confidence(conf_result)
             if top_conf >= rct or round_idx == rounds - 1:
                 break
-            # E1: targeted reflection from hypothesis verdicts beats the
-            # generic "search more broadly" message when a tracker exists
+
             hyp_summary = ""
-            if config.enable_hypothesis_loop and context.hypothesis_tracker is not None:
+            if config.hypotheses_enabled and context.hypothesis_tracker is not None:
                 hyp_summary = context.hypothesis_tracker.reflection_summary()
             context.reflection_feedback = hyp_summary or (
-                self.confirmation_agent.get_reflection_message(
-                    conf_result,
-                    confidence_threshold=rct,
-                )
+                self.confirmation_agent.get_reflection_message(conf_result, confidence_threshold=rct)
             )
             if verbose:
                 console.print(
@@ -415,56 +393,29 @@ class Orchestrator:
                     f"(top={top_conf:.2f}, threshold={rct:.2f})"
                 )
 
-        if conf_result and conf_result.success:
-            from evaluation.metrics import extract_methods_from_locations
+        return conf_result
 
+    def _finalize_result(
+        self,
+        result: LocalizationResult,
+        context: AgentContext,
+        conf_result: AgentResult | None,
+        processed,
+        repo_path: str,
+        verbose: bool,
+    ) -> None:
+        """Populate result with ranked files/methods/locations and apply scoring."""
+        from evaluation.metrics import extract_methods_from_locations
+
+        if conf_result and conf_result.success:
             output = conf_result.output
             result.ranked_locations = output.get("ranked_locations", [])
 
-            # Fallback: if ConfirmationAgent returned no ranked_locations but we have
-            # candidate_methods from log/stack-trace analysis, reconstruct locations.
             if not result.ranked_locations and context.candidate_methods:
-                logger.info(
-                    "[Orchestrator] ranked_locations empty — reconstructing from "
-                    "log-analysis candidate_methods"
-                )
-                for rank, method_id in enumerate(context.candidate_methods[:10], 1):
-                    # method_id format: "ClassName#methodName" or "file::Class.method"
-                    file_path = ""
-                    class_name = ""
-                    function_name = method_id
-                    if "::" in method_id:
-                        file_path, rest = method_id.split("::", 1)
-                        if "." in rest:
-                            class_name, function_name = rest.rsplit(".", 1)
-                        else:
-                            function_name = rest
-                    elif "#" in method_id:
-                        class_name, function_name = method_id.split("#", 1)
-                        # Try to map class to file using candidate_files
-                        for cf in context.candidate_files:
-                            if class_name and class_name.lower() in cf.lower():
-                                file_path = cf
-                                break
-                    if not file_path and context.candidate_files:
-                        file_path = context.candidate_files[0]
-                    result.ranked_locations.append({
-                        "rank": rank,
-                        "file_path": file_path,
-                        "function_name": function_name,
-                        "class_name": class_name,
-                        "start_line": 0,
-                        "end_line": 0,
-                        "confidence": max(0.3, 0.7 - (rank - 1) * 0.1),
-                        "explanation": f"Reconstructed from log/stack-trace analysis",
-                        "source": "log_analysis",
-                    })
+                result.ranked_locations = self._reconstruct_locations_from_methods(context)
 
             result.ranked_files = self._build_candidate_pool(result, context)
-            result.ranked_methods = extract_methods_from_locations(
-                result.ranked_locations
-            )
-            # Also include log-seeded methods not in ranked_locations
+            result.ranked_methods = extract_methods_from_locations(result.ranked_locations)
             for m in context.candidate_methods:
                 if m not in result.ranked_methods:
                     result.ranked_methods.append(m)
@@ -474,12 +425,9 @@ class Orchestrator:
             result.success = True
 
             if config.scoring.enable_unified_scoring:
-                result = self._apply_unified_scoring(
-                    result, context, processed, verbose
-                )
+                result = self._apply_unified_scoring(result, context, processed, verbose)
 
             self._maybe_rerank(result, context, verbose)
-
             if verbose:
                 self._print_results(result)
         else:
@@ -488,32 +436,67 @@ class Orchestrator:
             self._maybe_rerank(result, context, verbose)
             if verbose and conf_result is not None:
                 console.print(f"  ❌ Confirmation failed: {conf_result.error}")
-                console.print(
-                    f"  ⚠️  Falling back to candidate pool: {result.ranked_files[:10]}"
-                )
+                console.print(f"  ⚠️  Falling back to candidate pool: {result.ranked_files[:10]}")
 
-        # H1: patch-grounded duel between the final #1 and #2 (runs after
-        # every other ranking stage so its decision is final)
-        if config.enable_patch_duel:
-            self._run_patch_duel(result, context, verbose)
+        result.ranked_files = self._filter_nonexistent_files(result.ranked_files, repo_path)
 
-        # Filter out file paths that do not exist in the checked-out repo
-        result.ranked_files = self._filter_nonexistent_files(
-            result.ranked_files, repo_path
+    @staticmethod
+    def _reconstruct_locations_from_methods(context: AgentContext) -> list[dict]:
+        """Fallback: build ranked_locations from log/stack-trace candidate_methods."""
+        logger.info(
+            "[Orchestrator] ranked_locations empty — reconstructing from "
+            "log-analysis candidate_methods"
         )
-        result.total_time = time.time() - start_time
+        locations = []
+        for rank, method_id in enumerate(context.candidate_methods[:10], 1):
+            file_path = ""
+            class_name = ""
+            function_name = method_id
+            if "::" in method_id:
+                file_path, rest = method_id.split("::", 1)
+                if "." in rest:
+                    class_name, function_name = rest.rsplit(".", 1)
+                else:
+                    function_name = rest
+            elif "#" in method_id:
+                class_name, function_name = method_id.split("#", 1)
+                for cf in context.candidate_files:
+                    if class_name and class_name.lower() in cf.lower():
+                        file_path = cf
+                        break
+            if not file_path and context.candidate_files:
+                file_path = context.candidate_files[0]
+            locations.append({
+                "rank": rank,
+                "file_path": file_path,
+                "function_name": function_name,
+                "class_name": class_name,
+                "start_line": 0,
+                "end_line": 0,
+                "confidence": max(0.3, 0.7 - (rank - 1) * 0.1),
+                "explanation": "Reconstructed from log/stack-trace analysis",
+                "source": "log_analysis",
+            })
+        return locations
 
-        if verbose:
-            console.print(
-                f"\n⏱️  Total time: {result.total_time:.1f}s | "
-                f"LLM calls: {result.total_llm_calls} | "
-                f"Tool calls: {result.total_tool_calls} | "
-                f"Tokens: {result.total_prompt_tokens:,} prompt / "
-                f"{result.total_completion_tokens:,} completion / "
-                f"{result.total_tokens:,} total"
-            )
-
-        return result
+    @staticmethod
+    def _accumulate_agent_stats(
+        result: LocalizationResult, agent_result: AgentResult, key: str
+    ) -> None:
+        """Record per-agent stats in result.agent_results and accumulate totals."""
+        result.agent_results[key] = {
+            "success": agent_result.success,
+            "llm_calls": agent_result.num_llm_calls,
+            "tool_calls": agent_result.num_tool_calls,
+            "prompt_tokens": agent_result.prompt_tokens,
+            "completion_tokens": agent_result.completion_tokens,
+            "total_tokens": agent_result.total_tokens,
+        }
+        result.total_llm_calls += agent_result.num_llm_calls
+        result.total_tool_calls += agent_result.num_tool_calls
+        result.total_prompt_tokens += agent_result.prompt_tokens
+        result.total_completion_tokens += agent_result.completion_tokens
+        result.total_tokens += agent_result.total_tokens
 
     def multi_pass_localize(
         self,
@@ -865,55 +848,6 @@ class Orchestrator:
             return list(dict.fromkeys(ranked_files))
         return valid
 
-    def _run_patch_duel(
-        self, result: LocalizationResult, context: AgentContext, verbose: bool = False
-    ) -> None:
-        """H1: one call drafting a concrete patch for each of the top-2 files
-        and swapping them when the evidence favors #2. Fail-open: any error
-        keeps the existing order."""
-        files = result.ranked_files
-        if len(files) < 2 or files[0] == files[1]:
-            return
-        loc_map: dict[str, dict] = {}
-        for loc in result.ranked_locations or []:
-            fp = loc.get("file_path", "")
-            if fp and fp not in loc_map:
-                loc_map[fp] = loc
-
-        winner, usage = self.confirmation_agent.patch_duel(
-            context, files[0], files[1], loc_map
-        )
-        result.total_llm_calls += usage["llm_calls"]
-        result.total_prompt_tokens += usage["prompt_tokens"]
-        result.total_completion_tokens += usage["completion_tokens"]
-        result.total_tokens += usage["total_tokens"]
-
-        swapped = winner == files[1]
-        if swapped:
-            result.ranked_files = [files[1], files[0]] + files[2:]
-            # Mirror the swap in ranked_locations so downstream consumers agree
-            locs = result.ranked_locations or []
-            i1 = next((i for i, l in enumerate(locs)
-                       if l.get("file_path") == files[0]), None)
-            i2 = next((i for i, l in enumerate(locs)
-                       if l.get("file_path") == files[1]), None)
-            if i1 is not None and i2 is not None:
-                locs[i1], locs[i2] = locs[i2], locs[i1]
-                for rank, loc in enumerate(locs, 1):
-                    loc["rank"] = rank
-        result.agent_results["patch_duel"] = {
-            "winner": winner,
-            "swapped": swapped,
-            "llm_calls": usage["llm_calls"],
-        }
-        logger.info(
-            f"[PatchDuel] {'SWAPPED — new #1: ' + result.ranked_files[0] if swapped else 'kept #1: ' + files[0]}"
-        )
-        if verbose:
-            console.print(
-                f"  ⚔️  Patch duel: {'swapped → ' + result.ranked_files[0] if swapped else 'kept ' + files[0]}"
-            )
-
     def _run_verification_stage(
         self, result: LocalizationResult, context: AgentContext, verbose: bool = False
     ) -> None:
@@ -927,9 +861,12 @@ class Orchestrator:
         """
         if self.verification_agent is None or context.hypothesis_tracker is None:
             return
-        # E2 guard: when priority exploration is on, hypothesis probes are
-        # verified inside the explorer loop instead of a separate agent run.
-        if getattr(config, "enable_priority_exploration", False):
+        # E2/MACS guard: when priority exploration (or competitive scouting) is
+        # on, hypothesis probes are verified inside the explorer loop instead of
+        # a separate agent run.
+        if getattr(config, "enable_priority_exploration", False) or getattr(
+            config, "enable_competitive_scouting", False
+        ):
             return
         tracker = context.hypothesis_tracker
         if context.stack_trace_files and tracker.top_prior() >= config.hypothesis_fastpath_prior:
@@ -1050,7 +987,6 @@ class Orchestrator:
             git_recency_half_life_days=config.scoring.git_recency_half_life_days,
             test_file_penalty=config.scoring.test_file_penalty,
             hypothesis_support=config.scoring.weight_hypothesis_support,
-            rank_consensus=config.scoring.weight_rank_consensus,
         )
 
         scorer = UnifiedScorer(weights=weights)
@@ -1091,18 +1027,6 @@ class Orchestrator:
         if context.hypothesis_tracker is not None:
             hypothesis_scores = context.hypothesis_tracker.file_scores()
 
-        # RRF consensus across stage rankings (LocAgent-style, 0 LLM calls)
-        consensus_scores = {}
-        if config.scoring.weight_rank_consensus > 0:
-            from evaluation.rank_fusion import (
-                reciprocal_rank_fusion,
-                stage_rankings_from_context,
-            )
-
-            consensus_scores = reciprocal_rank_fusion(
-                stage_rankings_from_context(context, result.ranked_locations)
-            )
-
         candidate_scores = scorer.score_candidates(
             candidates=result.ranked_files,
             repo_path=context.repo_path,
@@ -1114,7 +1038,6 @@ class Orchestrator:
             semantic_scores=semantic_scores,
             method_counts=method_counts,
             hypothesis_scores=hypothesis_scores,
-            consensus_scores=consensus_scores,
         )
 
         result.ranked_files = [s.file_path for s in candidate_scores]

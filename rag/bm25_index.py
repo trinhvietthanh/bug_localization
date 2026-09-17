@@ -4,14 +4,6 @@ BM25 index for hybrid semantic + keyword search.
 Builds a file-level BM25 index from the documents already stored in Qdrant,
 so no extra file I/O is needed. The index is built lazily and cached per
 (repo_filter, language_filter) key.
-
-Tokenisation splits on:
-  - camelCase  (TypeInference → type, inference)
-  - PascalCase (FlowSensitiveInline → flow, sensitive, inline)
-  - snake_case  (parse_pattern → parse, pattern)
-  - dots/slashes (org.jfree.chart → org, jfree, chart)
-  - digits kept separately
-
 This gives BM25 a strong signal on identifier names, which are exactly
 the tokens that differentiate sibling files (e.g. TypeCheck vs TypeInference).
 """

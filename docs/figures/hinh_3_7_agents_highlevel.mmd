@@ -1,0 +1,30 @@
+%% Kiến trúc giao tiếp giữa các Agent — mức high-level (cho slide)
+flowchart TD
+    BR([Bug Report])
+    OUT([Kết quả: Ranked Files])
+
+    ORC["ORCHESTRATOR<br/>điều phối trung tâm"]
+
+    CTX[("AgentContext<br/>bộ nhớ chung<br/>hypothesis · candidates · traces")]
+
+    subgraph AGENTS["Ba tác nhân chuyên biệt"]
+        direction LR
+        CA["<b>1 · COMPREHENSION</b><br/>hiểu lỗi<br/>phát sinh giả thuyết"]
+        NA["<b>2 · NAVIGATION</b><br/>duyệt mã nguồn<br/>định vị nghi ngờ"]
+        CO["<b>3 · CONFIRMATION</b><br/>xác nhận & xếp hạng"]
+        CA --> NA --> CO
+    end
+
+    BR --> ORC
+    ORC -->|"run / process_result"| CTX
+    CTX <--> AGENTS
+    AGENTS --> OUT
+
+    classDef hub fill:#fff3e0,stroke:#ff9800,stroke-width:2.5px,color:#000
+    classDef mem fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#000
+    classDef agent fill:#e1f5fe,stroke:#03a9f4,stroke-width:2px,color:#000
+    classDef io fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#000
+    class ORC hub
+    class CTX mem
+    class CA,NA,CO agent
+    class BR,OUT io

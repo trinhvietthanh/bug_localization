@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/Django.iml" filepath="$PROJECT_DIR$/.idea/Django.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Flask.iml" filepath="$PROJECT_DIR$/.idea/Flask.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Flask@1.iml" filepath="$PROJECT_DIR$/.idea/Flask@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Flask@2.iml" filepath="$PROJECT_DIR$/.idea/Flask@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Flask@3.iml" filepath="$PROJECT_DIR$/.idea/Flask@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx.iml" filepath="$PROJECT_DIR$/.idea/Sphinx.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@1.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@10.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@10.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@11.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@11.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@12.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@12.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@13.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@13.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@14.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@14.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@15.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@15.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@16.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@16.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@2.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@3.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@4.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@4.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@5.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@5.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@6.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@6.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@7.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@7.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@8.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@8.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Sphinx@9.iml" filepath="$PROJECT_DIR$/.idea/Sphinx@9.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/astropy.iml" filepath="$PROJECT_DIR$/.idea/astropy.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flask-example-celery.iml" filepath="$PROJECT_DIR$/.idea/flask-example-celery.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flask-example-celery@1.iml" filepath="$PROJECT_DIR$/.idea/flask-example-celery@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flask-example-celery@2.iml" filepath="$PROJECT_DIR$/.idea/flask-example-celery@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flask-example-celery@3.iml" filepath="$PROJECT_DIR$/.idea/flask-example-celery@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flaskr.iml" filepath="$PROJECT_DIR$/.idea/flaskr.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flaskr@1.iml" filepath="$PROJECT_DIR$/.idea/flaskr@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flaskr@2.iml" filepath="$PROJECT_DIR$/.idea/flaskr@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/flaskr@3.iml" filepath="$PROJECT_DIR$/.idea/flaskr@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/js_example.iml" filepath="$PROJECT_DIR$/.idea/js_example.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/js_example@1.iml" filepath="$PROJECT_DIR$/.idea/js_example@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/js_example@2.iml" filepath="$PROJECT_DIR$/.idea/js_example@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/js_example@3.iml" filepath="$PROJECT_DIR$/.idea/js_example@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/matplotlib.iml" filepath="$PROJECT_DIR$/.idea/matplotlib.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/pylint.iml" filepath="$PROJECT_DIR$/.idea/pylint.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/pylint@1.iml" filepath="$PROJECT_DIR$/.idea/pylint@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/pylint@2.iml" filepath="$PROJECT_DIR$/.idea/pylint@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/pylint@3.iml" filepath="$PROJECT_DIR$/.idea/pylint@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/pylint@4.iml" filepath="$PROJECT_DIR$/.idea/pylint@4.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/pytest.iml" filepath="$PROJECT_DIR$/.idea/pytest.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/requests.iml" filepath="$PROJECT_DIR$/.idea/requests.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/scikit-learn.iml" filepath="$PROJECT_DIR$/.idea/scikit-learn.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/seaborn.iml" filepath="$PROJECT_DIR$/.idea/seaborn.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/seaborn@1.iml" filepath="$PROJECT_DIR$/.idea/seaborn@1.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/seaborn@2.iml" filepath="$PROJECT_DIR$/.idea/seaborn@2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/seaborn@3.iml" filepath="$PROJECT_DIR$/.idea/seaborn@3.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/seaborn@4.iml" filepath="$PROJECT_DIR$/.idea/seaborn@4.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/thesis.iml" filepath="$PROJECT_DIR$/.idea/thesis.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/xarray.iml" filepath="$PROJECT_DIR$/.idea/xarray.iml" />
+    </modules>
+  </component>
+</project>

@@ -131,9 +131,6 @@ class ScoringConfig:
     weight_git_recency: float = float(os.getenv("SCORE_WEIGHT_GIT_RECENCY", "0.5"))
     # E1: support from surviving hypotheses (posterior), negative for falsified
     weight_hypothesis_support: float = float(os.getenv("SCORE_WEIGHT_HYPOTHESIS", "0.8"))
-    # RRF consensus across stage rankings (comprehension/explorer/
-    # confirmation/stack-trace) — LocAgent-style; 0 disables
-    weight_rank_consensus: float = float(os.getenv("SCORE_WEIGHT_CONSENSUS", "1.0"))
     git_recency_half_life_days: int = int(os.getenv("SCORE_GIT_RECENCY_HALFLIFE_DAYS", "90"))
     test_file_penalty: float = float(os.getenv("SCORE_TEST_PENALTY", "0.5"))
     enable_unified_scoring: bool = os.getenv(
@@ -212,6 +209,18 @@ class Config:
     comprehension_verify_files: int = int(
         os.getenv("COMPREHENSION_VERIFY_FILES", "3")
     )
+    # Counterfactual patch-owner audit: after the normal answer, challenge the
+    # symptom-location hypothesis and add repository-validated invariant/config
+    # owners. Kept opt-in until the persistent-failure ablation is complete.
+    enable_comprehension_owner_challenge: bool = os.getenv(
+        "ENABLE_COMPREHENSION_OWNER_CHALLENGE", "false"
+    ).lower() not in ("false", "0", "no")
+    comprehension_owner_max_files: int = int(
+        os.getenv("COMPREHENSION_OWNER_MAX_FILES", "3")
+    )
+    comprehension_owner_max_searches: int = int(
+        os.getenv("COMPREHENSION_OWNER_MAX_SEARCHES", "3")
+    )
     # Full repository file listing in the comprehension prompt (the bare-LLM
     # baseline reaches 64% Top-1 from the tree alone — richest cheap signal)
     comprehension_file_tree: bool = os.getenv(
@@ -243,14 +252,6 @@ class Config:
     confirmation_verify_iters: int = int(
         os.getenv("CONFIRMATION_VERIFY_ITERS", "3")
     )
-    # H1: patch-grounded discrimination between the final #1 and #2 — one
-    # call drafting a concrete minimal patch for each, then picking the file
-    # a real fix would edit. Targets adjacent-layer confusions (gold at
-    # rank 2 = 7% of the 300-run).
-    enable_patch_duel: bool = os.getenv(
-        "ENABLE_PATCH_DUEL", "false"
-    ).lower() in ("true", "1", "yes")
-    patch_duel_max_lines: int = int(os.getenv("PATCH_DUEL_MAX_LINES", "150"))
     confirmation_evidence_top_k: int = int(
         os.getenv("CONFIRMATION_EVIDENCE_TOP_K", "8")
     )
@@ -291,6 +292,18 @@ class Config:
     exploration_fallback_to_freeform: bool = os.getenv(
         "EXPLORATION_FALLBACK_TO_FREEFORM", "true"
     ).lower() not in ("false", "0", "no")
+    # MACS: Multi-Agent Competitive Scouting — 2-3 Explorer agents run in
+    # parallel (one per hypothesis) over a shared blackboard; when one scout
+    # falsifies a hypothesis (or a file keeps scoring low), the cluster is
+    # pruned from every scout's frontier. Builds on E1 (hypotheses) + E2 engine.
+    enable_competitive_scouting: bool = os.getenv(
+        "ENABLE_COMPETITIVE_SCOUTING", "false"
+    ).lower() in ("true", "1", "yes")
+    scouting_num_scouts: int = int(os.getenv("SCOUTING_NUM_SCOUTS", "3"))
+    # Observation relevance strictly below this counts as a "low" signal
+    scouting_prune_relevance: int = int(os.getenv("SCOUTING_PRUNE_RELEVANCE", "3"))
+    # Consecutive low observations on one file before the file is pruned
+    scouting_prune_low_streak: int = int(os.getenv("SCOUTING_PRUNE_LOW_STREAK", "2"))
     # E3: hierarchical narrowing (file → function/line via one structured LLM call)
     enable_hierarchical_narrowing: bool = os.getenv(
         "ENABLE_HIERARCHICAL_NARROWING", "false"
@@ -302,6 +315,11 @@ class Config:
     ).lower() in ("true", "1", "yes")
     listwise_rerank_top_k: int = int(os.getenv("LISTWISE_RERANK_TOP_K", "10"))
     listwise_rerank_passes: int = int(os.getenv("LISTWISE_RERANK_PASSES", "1"))
+
+    @property
+    def hypotheses_enabled(self) -> bool:
+        """Comprehension should emit competing hypotheses when E1 OR MACS is on."""
+        return self.enable_hypothesis_loop or self.enable_competitive_scouting
 
 
 # Singleton config instance

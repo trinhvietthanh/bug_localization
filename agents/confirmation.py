@@ -115,27 +115,6 @@ evidence provided.
 """
 
 
-PATCH_DUEL_SYSTEM_PROMPT = """You are deciding between exactly TWO candidate files for where a bug-fix \
-patch must be applied. Do not assume either is currently preferred.
-
-For EACH candidate, draft the minimal CONCRETE patch (short unified-diff-style sketch with real \
-code, not prose) that would fix the reported bug if applied to THAT file. Then judge honestly: \
-which draft actually resolves the ROOT CAUSE on its own?
-
-Signs a candidate is the WRONG file:
-- its draft has to reference or modify logic that lives in the other file
-- its draft only masks the symptom instead of removing the cause
-- the natural fix belongs to the other layer (a settings/defaults module vs the logic that reads \
-it, a serializer vs the command invoking it, a base class vs a subclass, a compiler vs the AST node)
-
-Respond with JSON only:
-{"patch_a": "<diff sketch, may be abbreviated>",
- "patch_b": "<diff sketch, may be abbreviated>",
- "winner": "A",
- "reason": "<30 words: why the winning patch resolves the root cause>"}
-"""
-
-
 VERIFY_SYSTEM_PROMPT = """You are a Fault Confirmation Agent making the FINAL rank-1 decision.
 A previous pass already ranked candidates; your ONLY job is to decide which of the few
 candidates below is the file a FIX PATCH would actually edit.
@@ -479,74 +458,6 @@ class ConfirmationAgent(BaseAgent):
             self.name, "hybrid_verify",
             "changed" if changed else "confirmed",
         )
-
-    def patch_duel(
-        self,
-        context: AgentContext,
-        fp1: str,
-        fp2: str,
-        loc_map: dict[str, dict] | None = None,
-    ) -> tuple[str | None, dict]:
-        """H1: one patch-grounded call deciding between two finalist files.
-
-        Returns (winning file_path or None, usage dict). Candidates are
-        labelled A/B in ALPHABETICAL order and the current ranking is never
-        revealed, so the judge cannot anchor on position.
-        """
-        from config import config
-
-        loc_map = loc_map or {}
-        usage = {"llm_calls": 0, "prompt_tokens": 0,
-                 "completion_tokens": 0, "total_tokens": 0}
-        label_a, label_b = sorted([fp1, fp2])
-
-        parts = [
-            "## Bug Report\n",
-            context.problem_statement[:2500],
-            "",
-            "## Fault Hypothesis\n",
-            context.fault_hypothesis or "No hypothesis available.",
-            "",
-        ]
-        for label, fp in (("A", label_a), ("B", label_b)):
-            loc = dict(loc_map.get(fp) or {"file_path": fp})
-            loc["file_path"] = fp
-            excerpt = self._excerpt(context, loc, config.patch_duel_max_lines)
-            parts.append(f"## Candidate {label}: {fp}")
-            parts.append("```\n" + excerpt + "\n```" if excerpt else "(source unavailable)")
-            parts.append("")
-        parts.append(
-            "Draft the minimal concrete patch for EACH candidate, then pick "
-            "the winner. Respond with the required JSON only."
-        )
-
-        messages = [
-            {"role": "system", "content": PATCH_DUEL_SYSTEM_PROMPT},
-            {"role": "user", "content": "\n".join(parts)},
-        ]
-        try:
-            response = self._call_llm(messages, context, use_tools=False)
-        except Exception as e:
-            logger.warning(f"[ConfirmationAgent] patch duel call failed: {e}")
-            return None, usage
-        usage["llm_calls"] = 1
-        u = getattr(response, "usage", None)
-        if u:
-            usage["prompt_tokens"] = getattr(u, "prompt_tokens", 0) or 0
-            usage["completion_tokens"] = getattr(u, "completion_tokens", 0) or 0
-            usage["total_tokens"] = getattr(u, "total_tokens", 0) or 0
-        content = response.choices[0].message.content or ""
-        parsed = self._parse_output(content)
-        winner = str(parsed.get("winner", "")).strip().upper()
-        if winner not in ("A", "B"):
-            logger.info("[ConfirmationAgent] patch duel: unparseable winner — keeping order")
-            return None, usage
-        winning_fp = label_a if winner == "A" else label_b
-        context.add_trace(
-            self.name, "patch_duel",
-            f"winner={winning_fp} reason={str(parsed.get('reason', ''))[:120]}",
-        )
-        return winning_fp, usage
 
     def _build_verify_message(self, context: AgentContext, top: list[dict]) -> str:
         from config import config

@@ -157,8 +157,6 @@ def _code_search_rg(
     # Skip test directories
     for skip in SKIP_DIRS:
         cmd.extend(["--glob", f"!**/{skip}/**"])
-    cmd.extend(["--glob", "!**/test*/**"])
-
     cmd.append(query)
     cmd.append(repo_path)
 

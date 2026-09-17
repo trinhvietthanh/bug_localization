@@ -68,9 +68,6 @@ class AgentContext:
     # Structured navigation output (file_path/function/line-range/score/reason
     # dicts) — evidence for Confirmation's single-shot path
     suspicious_locations: list = field(default_factory=list)
-    # Snapshot of candidate_files right after comprehension (later phases
-    # mutate candidate_files) — one of the RRF stage rankings
-    comprehension_candidates: list = field(default_factory=list)
     # True when navigation used the free-form tool loop (its line ranges are
     # less reliable than the explorer's scored observations)
     navigation_was_freeform: bool = False

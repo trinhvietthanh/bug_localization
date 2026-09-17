@@ -5,6 +5,7 @@ from commands.index import cmd_index
 from commands.graph import cmd_graph
 from commands.defects4j import cmd_defects4j
 from commands.swebench import cmd_swebench
+from commands.sweexplore import cmd_sweexplore
 
 __all__ = [
     "cmd_localize",
@@ -13,4 +14,5 @@ __all__ = [
     "cmd_graph",
     "cmd_defects4j",
     "cmd_swebench",
+    "cmd_sweexplore",
 ]
